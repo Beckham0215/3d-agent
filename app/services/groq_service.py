@@ -235,9 +235,32 @@ def _parse_router_json(text: str) -> dict:
         "reply": data.get("reply"),
     }
 
+_VISION_SKIP_WORDS = frozenset({
+    "image", "photo", "picture", "room", "floor", "wall",
+    "ceiling", "window", "door", "light", "none", "area",
+})
+
+
+def parse_groq_vision_response(text: str) -> dict:
+    """Parse the structured 'item: count' response from Llama 4 Scout vision.
+
+    Expected format: ``chair: 2, table: 1, sofa: 1``
+    Returns an empty dict for "none" / "nothing" or unparseable input.
+    """
+    if not text or text.lower().strip() in ("none", "nothing", "no objects", ""):
+        return {}
+    counts: dict = {}
+    for match in re.finditer(r'([\w][\w\s]*?)\s*:\s*(\d+)', text.lower()):
+        item  = match.group(1).strip()
+        count = int(match.group(2))
+        if item and count > 0 and item not in _VISION_SKIP_WORDS and len(item) > 1:
+            counts[item] = count
+    return counts
+
+
 def detect_objects_from_image(image_b64: str, area_context: str | None = None) -> dict:
     """
-    Use Groq vision to detect and count objects CLOSE to the camera only.
+    Use Groq vision (Llama 4 Scout) to detect and count objects CLOSE to the camera.
     area_context: optional room name to help the model filter relevant objects.
     """
     if not image_b64:
@@ -281,19 +304,7 @@ def detect_objects_from_image(image_b64: str, area_context: str | None = None) -
         )
         answer = (completion.choices[0].message.content or "").strip()
         current_app.logger.info(f"[Groq Vision] Raw response: {answer}")
-
-        if answer.lower().strip() in ("none", "nothing", "no objects", ""):
-            return {}
-
-        counts = {}
-        skip_words = {"image", "photo", "picture", "room", "floor", "wall",
-                      "ceiling", "window", "door", "light", "none", "area"}
-        for match in re.finditer(r'([\w][\w\s]*?)\s*:\s*(\d+)', answer.lower()):
-            item  = match.group(1).strip()
-            count = int(match.group(2))
-            if item and count > 0 and item not in skip_words and len(item) > 1:
-                counts[item] = count
-
+        counts = parse_groq_vision_response(answer)
         current_app.logger.info(f"[Groq Vision] Parsed counts: {counts}")
         return counts
 

@@ -52,5 +52,12 @@ def create_app():
 
     with app.app_context():
         db.create_all()
+        # Add sweep_uuid column to assets_summary if it was created before this column existed
+        try:
+            with db.engine.connect() as conn:
+                conn.execute(db.text("ALTER TABLE assets_summary ADD COLUMN sweep_uuid VARCHAR(64)"))
+                conn.commit()
+        except Exception:
+            pass  # Column already exists
 
     return app

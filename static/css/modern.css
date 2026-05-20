@@ -863,8 +863,8 @@ label {
   position: absolute;
   right: 16px;
   bottom: 16px;
-  width: min(320px, calc(100vw - 32px));
-  max-height: min(420px, calc(100vh - 32px));
+  width: min(360px, calc(100vw - 32px));
+  max-height: min(580px, calc(100vh - 64px));
   display: flex;
   flex-direction: column;
   background: var(--surface-1);
@@ -873,6 +873,7 @@ label {
   box-shadow: var(--shadow-lg);
   backdrop-filter: blur(16px);
   z-index: 4;
+  overflow: hidden;
   animation: slideUp 0.6s cubic-bezier(0.34, 1.56, 0.64, 1);
   transition: all 0.3s ease;
 }
@@ -881,11 +882,10 @@ label {
   max-height: 44px;
   width: auto;
   min-width: 150px;
+  overflow: hidden;
 }
 
-.chat-overlay.minimized .chat-body,
-.chat-overlay.minimized .chat-form,
-.chat-overlay.minimized .chat-footer {
+.chat-overlay.minimized .chat-body {
   display: none;
 }
 
@@ -901,18 +901,60 @@ label {
 }
 
 .chat-header {
-  padding: var(--spacing-sm) var(--spacing-md);
+  display: flex;
+  justify-content: space-between;
+  align-items: center;
+  padding: 10px 14px;
   border-bottom: 1px solid var(--border);
-  background: linear-gradient(135deg, rgba(16, 163, 127, 0.05) 0%, rgba(99, 102, 241, 0.02) 100%);
+  background: linear-gradient(135deg, rgba(16, 163, 127, 0.06) 0%, rgba(99, 102, 241, 0.03) 100%);
   flex-shrink: 0;
 }
 
-.chat-header h2 {
+.chat-title-group {
+  display: flex;
+  align-items: center;
+  gap: 7px;
+  flex: 1;
+  min-width: 0;
+}
+
+.chat-status-dot {
+  width: 7px;
+  height: 7px;
+  border-radius: 50%;
+  background: var(--accent-primary);
+  box-shadow: 0 0 5px var(--accent-primary);
+  flex-shrink: 0;
+}
+
+.chat-title {
   margin: 0;
-  font-size: 0.95rem;
+  font-size: 0.92rem;
   font-weight: 700;
   color: var(--text-primary);
   letter-spacing: -0.01em;
+}
+
+.chat-ai-badge {
+  font-size: 0.62rem;
+  font-weight: 700;
+  padding: 1px 5px;
+  border-radius: 8px;
+  background: rgba(16, 163, 127, 0.15);
+  border: 1px solid rgba(16, 163, 127, 0.3);
+  color: var(--accent-primary);
+  text-transform: uppercase;
+  letter-spacing: 0.06em;
+  flex-shrink: 0;
+}
+
+/* Chat body — flex column, NO body-level scroll; only chat-log scrolls */
+.chat-body {
+  display: flex;
+  flex-direction: column;
+  flex: 1;
+  min-height: 0;
+  overflow: hidden;
 }
 
 .chat-log {
@@ -924,7 +966,7 @@ label {
   display: flex;
   flex-direction: column;
   gap: var(--spacing-sm);
-  min-height: 200px;
+  min-height: 80px;
 }
 
 .chat-log::-webkit-scrollbar {
@@ -1172,25 +1214,56 @@ label {
   justify-content: flex-end;
 }
 
+/* Quick-action bar above the input row */
+.chat-actions-strip {
+  display: flex;
+  gap: 6px;
+  padding: 5px 8px;
+  border-top: 1px solid var(--border);
+  background: rgba(0, 0, 0, 0.12);
+  flex-shrink: 0;
+}
+
+.chat-action-btn {
+  flex: 1;
+  justify-content: center;
+}
+
+/* Icon-sized circular buttons (mic, send) */
+.icon-btn {
+  width: 34px;
+  height: 34px;
+  padding: 0 !important;
+  flex-shrink: 0;
+  border-radius: 50% !important;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  font-size: 0.85rem;
+}
+
 .chat-form {
   display: flex;
-  gap: var(--spacing-sm);
-  padding: var(--spacing-sm);
+  gap: 6px;
+  padding: 8px;
   border-top: 1px solid var(--border);
   background: rgba(0, 0, 0, 0.15);
   flex-shrink: 0;
+  align-items: center;
 }
 
 .chat-form input {
   flex: 1;
-  padding: 0.5rem 0.7rem;
+  min-width: 0;
+  padding: 0.48rem 0.7rem;
   border-radius: var(--radius-md);
   border: 1px solid var(--border);
   background: rgba(0, 0, 0, 0.4);
   color: var(--text-primary);
   font-size: 0.8rem;
   transition: all 0.2s ease;
-  min-width: 100px;
+  /* Override global form sizing */
+  width: auto;
 }
 
 .chat-form input:focus {
@@ -1202,33 +1275,65 @@ label {
 
 .chat-footer {
   display: flex;
-  justify-content: space-between;
-  flex-wrap: wrap;
-  padding: 0.5rem var(--spacing-md);
-  font-size: 0.7rem;
+  align-items: center;
+  gap: 5px;
+  padding: 5px 8px;
   border-top: 1px solid var(--border);
-  background: rgba(0, 0, 0, 0.2);
-  gap: var(--spacing-sm);
+  background: rgba(0, 0, 0, 0.22);
   flex-shrink: 0;
 }
 
-.chat-footer a {
-  color: var(--accent-primary);
-  transition: all 0.2s ease;
-  font-weight: 600;
-  white-space: nowrap;
+.chat-footer .btn.ghost.small {
+  padding: 0.22rem 0.55rem;
+  font-size: 0.72rem;
+  border-radius: var(--radius-sm);
 }
 
-.chat-footer a:hover {
-  color: var(--accent-primary-light);
+.chat-footer-link {
+  margin-left: auto;
+  color: var(--text-muted);
+  font-size: 0.72rem;
+  font-weight: 500;
+  white-space: nowrap;
+  text-decoration: none;
+  transition: color 0.2s ease;
+  padding: 0.22rem 0.35rem;
+}
+
+.chat-footer-link:hover {
+  color: var(--accent-primary);
 }
 
 .scan-review-panel {
-  margin: 0 var(--spacing-sm) var(--spacing-sm);
-  padding: var(--spacing-sm);
+  margin: 5px 8px;
+  padding: 8px 10px;
   border: 1px solid var(--border);
   border-radius: var(--radius-md);
-  background: rgba(0, 0, 0, 0.2);
+  background: rgba(0, 0, 0, 0.25);
+  flex-shrink: 0;
+}
+
+/* Compact select + input inside scan panels — override global 0.75rem padding */
+.scan-review-panel select,
+.scan-review-panel input[type="text"] {
+  padding: 5px 8px;
+  font-size: 0.78rem;
+  margin-bottom: 5px;
+  border-radius: var(--radius-sm);
+  width: 100%;
+}
+
+.scan-divider-label {
+  text-align: center;
+  font-size: 0.7rem;
+  color: var(--text-muted);
+  margin: 3px 0 5px;
+}
+
+.btn-full {
+  width: 100%;
+  justify-content: center;
+  margin-bottom: 5px;
 }
 
 .scan-review-title {
@@ -1247,9 +1352,9 @@ label {
 .scan-review-list {
   display: flex;
   flex-direction: column;
-  gap: 8px;
-  margin-bottom: var(--spacing-sm);
-  max-height: 180px;
+  gap: 6px;
+  margin-bottom: 6px;
+  max-height: 150px;
   overflow-y: auto;
   font-size: 0.8rem;
 }
@@ -1489,6 +1594,11 @@ label {
   margin-bottom: var(--spacing-md);
 }
 
+/* Chat header does not use panel-header's bottom margin */
+.chat-header {
+  margin-bottom: 0;
+}
+
 .hud-panel.minimized .panel-header {
   margin-bottom: 0;
 }
@@ -1548,30 +1658,26 @@ label {
 }
 
 .sdk-status {
-  padding: var(--spacing-sm);
-  font-size: 0.75rem;
+  padding: 5px 10px;
+  font-size: 0.72rem;
   color: var(--text-muted);
-  background: rgba(0, 0, 0, 0.2);
-  border-radius: var(--radius-md);
+  background: rgba(0, 0, 0, 0.18);
+  border-bottom: 1px solid var(--border-light);
   text-align: center;
   flex-shrink: 0;
 }
 
 .voice-btn {
-  padding: 0.5rem 0.65rem;
-  font-size: 0.9rem;
-  border-radius: var(--radius-md);
+  /* sizing handled by .icon-btn; only voice-specific overrides here */
   background: transparent;
   border: 1px solid var(--border);
   transition: all 0.2s ease;
   cursor: pointer;
-  flex-shrink: 0;
 }
 
 .voice-btn:hover {
   background: rgba(16, 163, 127, 0.1);
   border-color: var(--accent-primary);
-  transform: scale(1.05);
 }
 
 .voice-btn.recording {

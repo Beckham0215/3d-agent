@@ -33,6 +33,9 @@
   let autoTagShouldStop = false;
   let pendingScanCounts = null;
   let selectedScanItems = {};
+  let pendingScanSweepUuid = null; // sweep where current scan was initiated
+  let scanResultTags = {};         // sweepUuid → {tagSids, counts, areaName, confirmed}
+  let scanTagsVisible = false;
   const chatHistory = []; // [{role:"user"|"assistant", content}] — last 10 msgs
 
   // Minimap state
@@ -888,6 +891,121 @@
     return counts;
   }
 
+  // ── Scan-result Mattertag overlay helpers ────────────────────────────────
+
+  async function _placeScanTag(sweepUuid, areaName, counts, isConfirmed) {
+    if (!sdk || !sdk.Mattertag) return;
+    // Remove existing tag for this sweep
+    const existing = scanResultTags[sweepUuid];
+    if (existing && existing.tagSids && existing.tagSids.length) {
+      try { await sdk.Mattertag.remove(existing.tagSids); } catch (_) {}
+    }
+    const sweepData = allSweepData[sweepUuid];
+    if (!sweepData || !sweepData.position) {
+      scanResultTags[sweepUuid] = { tagSids: [], counts, areaName, confirmed: isConfirmed };
+      return;
+    }
+    const pos = sweepData.position;
+    const label = (isConfirmed ? "✓ " : "📷 ") + (areaName || "Scan");
+    const entries = Object.entries(counts || {})
+      .map(function (kv) {
+        var v = kv[1];
+        return [kv[0], typeof v === "object" && v !== null ? (v.count || 0) : (parseInt(v) || 0)];
+      })
+      .filter(function (kv) { return kv[1] > 0; })
+      .sort(function (a, b) { return b[1] - a[1]; })
+      .slice(0, 6);
+    const desc = entries.length
+      ? entries.map(function (kv) { return kv[0] + ": " + kv[1]; }).join("\n")
+      : "Scanning…";
+    const color = isConfirmed
+      ? { r: 0.063, g: 0.639, b: 0.498 }
+      : { r: 0.984, g: 0.749, b: 0.141 };
+    try {
+      const sids = await sdk.Mattertag.add({
+        label: label,
+        description: desc,
+        anchorPosition: { x: pos.x, y: pos.y - 0.1, z: pos.z },
+        stemVector: { x: 0, y: 0.4, z: 0 },
+        color: color,
+      });
+      const sidList = Array.isArray(sids) ? sids : [sids];
+      scanResultTags[sweepUuid] = { tagSids: sidList, counts, areaName, confirmed: isConfirmed };
+    } catch (e) {
+      console.warn("[3DAgent] Could not place scan tag:", e);
+      scanResultTags[sweepUuid] = { tagSids: [], counts, areaName, confirmed: isConfirmed };
+    }
+  }
+
+  async function _removeAllScanTags() {
+    const allSids = Object.values(scanResultTags)
+      .flatMap(function (t) { return t.tagSids || []; })
+      .filter(Boolean);
+    if (allSids.length && sdk && sdk.Mattertag) {
+      try { await sdk.Mattertag.remove(allSids); } catch (_) {}
+    }
+    scanResultTags = {};
+  }
+
+  async function loadAndShowScanTags() {
+    if (!sdk || !sdk.Mattertag) {
+      appendLine("system", "SDK not ready — please wait for Matterport to connect.");
+      return;
+    }
+    try {
+      const [assetsRes, panelRes] = await Promise.all([
+        fetch("/api/spaces/" + mapId + "/assets", { credentials: "same-origin" }),
+        fetch("/api/spaces/" + mapId + "/assets-panel", { credentials: "same-origin" }),
+      ]);
+      const assetsData = await assetsRes.json().catch(function () { return { assets: [] }; });
+      const panelData  = await panelRes.json().catch(function () { return { scan_summaries: [] }; });
+
+      // label_name (lower-cased) → sweep_uuid
+      const labelToSweep = {};
+      (assetsData.assets || []).forEach(function (a) {
+        if (a.label_name && a.sweep_uuid) labelToSweep[a.label_name.toLowerCase()] = a.sweep_uuid;
+      });
+
+      // Group scan rows by area_name → {assetName: count}
+      const areaCountsMap = {};
+      (panelData.scan_summaries || []).forEach(function (s) {
+        if (!s.area_name) return;
+        if (!areaCountsMap[s.area_name]) areaCountsMap[s.area_name] = {};
+        if (s.asset_name && s.count > 0) areaCountsMap[s.area_name][s.asset_name] = s.count;
+      });
+
+      let placed = 0;
+      for (const [areaName, counts] of Object.entries(areaCountsMap)) {
+        const sweepUuid = labelToSweep[areaName.toLowerCase()];
+        if (sweepUuid) {
+          await _placeScanTag(sweepUuid, areaName, counts, true);
+          placed++;
+        }
+      }
+      if (placed === 0) {
+        appendLine("system", "No confirmed scan data with matching tagged locations found. Scan an area and confirm first.");
+      } else {
+        appendLine("system", "Showing " + placed + " scanned area tag(s) in the 3D space.");
+      }
+    } catch (e) {
+      console.warn("[3DAgent] Failed to load scan tags:", e);
+      appendLine("system", "Could not load scan data: " + (e.message || String(e)));
+    }
+  }
+
+  async function toggleScanTags() {
+    scanTagsVisible = !scanTagsVisible;
+    const btn = document.getElementById("show-scanned-btn");
+    if (scanTagsVisible) {
+      if (btn) { btn.textContent = "🏷️ Hide Scanned"; btn.style.color = "var(--accent-primary)"; }
+      await loadAndShowScanTags();
+    } else {
+      if (btn) { btn.textContent = "🏷️ Show Scanned"; btn.style.color = ""; }
+      await _removeAllScanTags();
+      appendLine("system", "Scan highlights hidden.");
+    }
+  }
+
   // ── Main scan dispatcher ──────────────────────────────────────────────────
 
   async function scanArea(category) {
@@ -948,9 +1066,12 @@
 
     const counts = _buildCounts(sightings, stepAngles.length);
     pendingScanCounts = counts;
+    pendingScanSweepUuid = currentSweepUuid;
     renderScanReview(counts);
     appendLine("agent", `✅ Scan complete. ${formatCountsForChat(counts)}`);
     appendLine("system", "Review detected items below, then click 'Add to assets'.");
+    // Show a pending (yellow) tag at this sweep so user sees what was detected
+    await _placeScanTag(currentSweepUuid, areaName || "Current Scan", counts, false);
     await suggestLocationName(counts);
   }
 
@@ -982,6 +1103,10 @@
       await handleNavigate(sweep.sweep_uuid);
       await sleep(2200);
 
+      // Place a "scanning…" placeholder tag at this sweep
+      await _placeScanTag(sweep.sweep_uuid, sweep.label_name || category, {}, false);
+
+      const sweepLocalSightings = {};
       const baseRotation = await getCurrentRotation();
       for (const angle of stepAngles) {
         if (scanShouldStop) break;
@@ -995,7 +1120,12 @@
           area_name: category,
         });
         mergeViewDetections(aggregatedSightings, scanResult.objects || {});
+        mergeViewDetections(sweepLocalSightings, scanResult.objects || {});
       }
+
+      // Update tag with what was found at this specific sweep
+      const sweepCounts = _buildCounts(sweepLocalSightings, stepAngles.length);
+      await _placeScanTag(sweep.sweep_uuid, sweep.label_name || category, sweepCounts, false);
     }
 
     const counts = _buildCounts(aggregatedSightings, sweeps.length * stepAngles.length);
@@ -1219,6 +1349,18 @@
           throw new Error(data.error || res.statusText);
         }
         appendLine("agent", `✓ Confirmed! Saved ${Object.keys(editedCounts).length} assets for '${areaName}'.`);
+
+        // Upgrade any pending (yellow) tag for the saved sweep to confirmed (green)
+        if (pendingScanSweepUuid) {
+          await _placeScanTag(pendingScanSweepUuid, areaName, editedCounts, true);
+        }
+        // If "Show Scanned Assets" is active, reload to include the new confirmed area
+        if (scanTagsVisible) {
+          await _removeAllScanTags();
+          await loadAndShowScanTags();
+        }
+        pendingScanSweepUuid = null;
+
         hideScanReview();
         if (scanAreaNameInput) scanAreaNameInput.value = "";
         if (scanLocationSelect) scanLocationSelect.value = "";
@@ -1234,10 +1376,26 @@
   }
 
   if (scanCancelBtn) {
-    scanCancelBtn.addEventListener("click", function () {
+    scanCancelBtn.addEventListener("click", async function () {
+      // Remove the pending (yellow) tag if scan was not confirmed
+      if (pendingScanSweepUuid && scanResultTags[pendingScanSweepUuid] &&
+          !scanResultTags[pendingScanSweepUuid].confirmed) {
+        const sids = scanResultTags[pendingScanSweepUuid].tagSids || [];
+        if (sids.length && sdk && sdk.Mattertag) {
+          try { await sdk.Mattertag.remove(sids); } catch (_) {}
+        }
+        delete scanResultTags[pendingScanSweepUuid];
+      }
+      pendingScanSweepUuid = null;
       hideScanReview();
       appendLine("system", "Scan results discarded.");
     });
+  }
+
+  // ── "Show Scanned Assets" button ─────────────────────────────────────────
+  const showScannedBtn = document.getElementById("show-scanned-btn");
+  if (showScannedBtn) {
+    showScannedBtn.addEventListener("click", function () { toggleScanTags(); });
   }
 
   loadScanLocations();

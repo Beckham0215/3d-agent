@@ -58,6 +58,7 @@ class AssetsSummary(db.Model):
     area_name = db.Column(db.String(200), nullable=True)
     asset_name = db.Column(db.String(100), nullable=False, index=True)
     count = db.Column(db.Integer, nullable=False, default=0)
+    sweep_uuid = db.Column(db.String(64), nullable=True)
     created_at = db.Column(db.DateTime, default=datetime.utcnow, nullable=False)
 
 
