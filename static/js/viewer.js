@@ -36,8 +36,10 @@
   let pendingScanSweepUuid = null; // sweep where current scan was initiated
   let scanResultTags = {};         // sweepUuid → {tagSids, counts, areaName, confirmed}
   let scanTagsVisible = false;
-  let pendingScanViewData = [];    // [{angle, objects, bboxes}] — per-view data for Feature 2
-  let pendingScanBaseRotation = { x: 0, y: 0 }; // base rotation at scan start (Feature 2)
+  let pendingScanViewData = [];    // [{angle, absolute_angle, sweep_uuid, objects, bboxes, image}]
+  let pendingScanBaseRotation = { x: 0, y: 0 }; // base rotation at scan start
+  let tightBboxCache = {};         // assetName → [x1,y1,x2,y2] — pre-fetched tight bboxes
+  let _prefetchPromise = null;     // Promise returned by _prefetchTightBboxes — awaited before save
   const chatHistory = []; // [{role:"user"|"assistant", content}] — last 10 msgs
 
   // Minimap state
@@ -47,6 +49,10 @@
   let currentFloorId  = null;
   let minimapCollapsed = false;
   let minimapPulse    = 0;   // 0..1 animation phase
+
+  // Route state
+  let activeRoute = null;    // {path:[uuid,...], target:uuid, label:string, step:number} | null
+  let _routeAbort = false;   // set true to cancel in-progress route walk
 
   // --- Web Speech API Setup ---
   const SpeechRecognition = window.SpeechRecognition || window.webkitSpeechRecognition;
@@ -594,40 +600,41 @@
             if (c > bestCount) { bestCount = c; bestView = view; }
           });
 
-          // Show "searching" state immediately
+          // Show feedback immediately
           clearHighlightOverlay();
-          if (shoLabelEl) shoLabelEl.textContent = `🔍 ${assetName} — rotating to best view…`;
+          if (shoLabelEl) shoLabelEl.textContent = `🔍 ${assetName} — locating…`;
           if (scanHighlightOverlay) scanHighlightOverlay.style.display = "block";
 
-          // Rotate camera to the best angle
           const yaw = (pendingScanBaseRotation.y || 0) + bestView.angle;
-          try {
-            await rotateToYawAtCurrentSweep(yaw, pendingScanBaseRotation.x || 0);
-          } catch (_) {}
 
-          // Update label while fetching precise bbox
-          if (shoLabelEl) shoLabelEl.textContent = `🔍 ${assetName} — locating…`;
+          if (tightBboxCache[assetName] !== undefined) {
+            // Cache hit — bbox is [x1,y1,x2,y2] or null
+            try { await rotateToYawAtCurrentSweep(yaw, pendingScanBaseRotation.x || 0); } catch (_) {}
+            showHighlightOverlay(assetName, tightBboxCache[assetName]);
+          } else {
+            // Cache miss — rotate and fetch the primary bbox in parallel
+            const rotationDone = rotateToYawAtCurrentSweep(yaw, pendingScanBaseRotation.x || 0).catch(() => {});
+            const bboxReady = bestView.image
+              ? fetch("/api/locate-object", {
+                  method: "POST",
+                  headers: { "Content-Type": "application/json" },
+                  credentials: "same-origin",
+                  body: JSON.stringify({ map_id: mapId, object_name: assetName, image_base64: bestView.image }),
+                })
+                  .then((r) => r.json().catch(() => ({})))
+                  .then((d) => (d.ok && d.bbox) ? d.bbox : null)
+                  .catch(() => null)
+              : Promise.resolve(null);
 
-          // Capture a fresh screenshot at the rotated angle and get a tight
-          // per-object bounding box from the vision model via /api/locate-object.
-          try {
-            const freshImg = await captureViewportBase64();
-            const locRes = await fetch("/api/locate-object", {
-              method: "POST",
-              headers: { "Content-Type": "application/json" },
-              credentials: "same-origin",
-              body: JSON.stringify({ map_id: mapId, object_name: assetName, image_base64: freshImg }),
-            });
-            const locData = await locRes.json().catch(() => ({}));
-            showHighlightOverlay(assetName, (locData.ok && locData.bbox) ? locData.bbox : null);
-          } catch (_) {
-            showHighlightOverlay(assetName, null);
+            const [, bbox] = await Promise.all([rotationDone, bboxReady]);
+            tightBboxCache[assetName] = bbox;
+            showHighlightOverlay(assetName, bbox);
           }
         });
       });
     }
 
-    scanReviewPanel.style.display = "block";
+    scanReviewPanel.style.display = "flex";
   }
 
   function formatCountsForChat(counts) {
@@ -649,12 +656,43 @@
     ).join(", ");
   }
 
+  // Pre-fetch the primary tight bbox for each detected asset right after the scan.
+  // Uses /api/locate-object (single reliable detection per asset) so the first
+  // click on any scan result is instant.
+  // tightBboxCache[name] = [x1,y1,x2,y2] | null  (single value, not wrapped in array).
+  // Returns a Promise so the save handler can await before building bbox_data.
+  function _prefetchTightBboxes(counts) {
+    tightBboxCache = {};
+    const names = Object.keys(counts || {});
+    const fetches = names.map((name) => {
+      let bestView = null, bestCount = 0;
+      pendingScanViewData.forEach((view) => {
+        const c = view.objects[name] || 0;
+        if (c > bestCount) { bestCount = c; bestView = view; }
+      });
+      if (!bestView || !bestView.image) return Promise.resolve();
+
+      return fetch("/api/locate-object", {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        credentials: "same-origin",
+        body: JSON.stringify({ map_id: mapId, object_name: name, image_base64: bestView.image }),
+      })
+        .then((r) => r.json().catch(() => ({})))
+        .then((d) => { tightBboxCache[name] = (d.ok && d.bbox) ? d.bbox : null; })
+        .catch(() => {});
+    });
+    return Promise.all(fetches);
+  }
+
   function hideScanReview() {
     if (!scanReviewPanel) return;
     scanReviewPanel.style.display = "none";
     pendingScanCounts = null;
     selectedScanItems = {};
     pendingScanViewData = [];
+    tightBboxCache = {};
+    _prefetchPromise = null;
     if (scanAreaNameInput) scanAreaNameInput.value = "";
     if (scanLocationSelect) scanLocationSelect.value = "";
     clearHighlightOverlay();
@@ -988,7 +1026,7 @@
   async function showScanModePicker() {
     if (!scanModePicker) return;
     await loadScanCategories();
-    scanModePicker.style.display = "block";
+    scanModePicker.style.display = "flex";
   }
 
   function hideScanModePicker() {
@@ -1210,8 +1248,11 @@
       mergeViewDetections(sightings, scanResult.objects || {});
       pendingScanViewData.push({
         angle: stepAngles[i],
+        absolute_angle: (baseRotation.y || 0) + stepAngles[i],
+        sweep_uuid: currentSweepUuid,
         objects: scanResult.objects || {},
         bboxes: scanResult.positions || {},
+        image: imageBase64,
       });
       showLiveOverlay(i + 1, stepAngles.length, stepAngles[i], scanResult.objects || {});
     }
@@ -1220,6 +1261,7 @@
     const counts = _buildCounts(sightings, stepAngles.length);
     pendingScanCounts = counts;
     pendingScanSweepUuid = currentSweepUuid;
+    _prefetchPromise = _prefetchTightBboxes(counts);
     renderScanReview(counts);
     appendLine("agent", `✅ Scan complete. ${formatCountsForChat(counts)}`);
     appendLine("system", "Review detected items below, then click 'Add to assets'.");
@@ -1279,8 +1321,11 @@
         showLiveOverlay(ai + 1, stepAngles.length, angle, scanResult.objects || {});
         pendingScanViewData.push({
           angle: angle,
+          absolute_angle: (baseRotation.y || 0) + angle,
+          sweep_uuid: sweep.sweep_uuid,
           objects: scanResult.objects || {},
           bboxes: scanResult.positions || {},
+          image: imageBase64,
         });
       }
 
@@ -1293,6 +1338,7 @@
     const counts = _buildCounts(aggregatedSightings, sweeps.length * stepAngles.length);
     pendingScanCounts = counts;
     if (scanAreaNameInput) scanAreaNameInput.value = category;
+    _prefetchPromise = _prefetchTightBboxes(counts);
     renderScanReview(counts);
     if (!scanShouldStop) {
       appendLine("agent", `✅ Whole-area scan of "${category}" (${sweeps.length} sweeps) complete. ${formatCountsForChat(counts)}`);
@@ -1326,21 +1372,127 @@
     return data;
   }
 
+  // ── Pathfinding (BFS using Matterport neighbor graph) ──────────────────────
+
+  function findRoute(startId, endId) {
+    if (!startId || !endId || startId === endId) return [startId].filter(Boolean);
+    const prev = {};
+    const queue = [startId];
+    const visited = new Set([startId]);
+
+    while (queue.length) {
+      const cur = queue.shift();
+      const sweep = allSweepData[cur];
+      if (!sweep) continue;
+      const neighbors = sweep.neighbors || [];
+      for (const nid of neighbors) {
+        if (visited.has(nid)) continue;
+        visited.add(nid);
+        prev[nid] = cur;
+        if (nid === endId) {
+          const path = [];
+          let at = endId;
+          while (at !== undefined) { path.unshift(at); at = prev[at]; }
+          return path;
+        }
+        queue.push(nid);
+      }
+    }
+    return null; // no path found (disconnected graph)
+  }
+
+  function clearRoute() {
+    activeRoute = null;
+    _routeAbort = true;
+    _updateRouteHud();
+  }
+
+  function _updateRouteHud() {
+    const hud = document.getElementById("route-hud");
+    if (!hud) return;
+    if (!activeRoute) {
+      hud.style.display = "none";
+      return;
+    }
+    const total = activeRoute.path.length - 1;
+    const step  = Math.min(activeRoute.step, total);
+    document.getElementById("route-hud-label").textContent =
+      `📍 ${activeRoute.label}`;
+    document.getElementById("route-hud-step").textContent =
+      `Step ${step} / ${total}`;
+    hud.style.display = "flex";
+  }
+
+  // Route navigation — computes path then walks sweep-by-sweep.
+  // Falls back to a direct jump when graph data is unavailable or no path exists.
+  async function navigateWithRoute(sweepUuid, label) {
+    if (!sdk || !sdk.Sweep) {
+      appendLine("system", "SDK not connected — cannot navigate.");
+      return;
+    }
+
+    label = label || "destination";
+    const startId = currentSweepUuid;
+    const path    = (startId && Object.keys(allSweepData).length)
+      ? findRoute(startId, sweepUuid)
+      : null;
+
+    // Fewer than 2 hops — just jump directly (no meaningful route to show)
+    if (!path || path.length <= 2) {
+      appendLine("agent", `Navigating to ${label}…`);
+      await handleNavigate(sweepUuid);
+      return;
+    }
+
+    const steps = path.length - 1;
+    appendLine("agent", `📍 Route to ${label} — ${steps} step${steps > 1 ? "s" : ""}`);
+
+    // Activate route state
+    _routeAbort = false;
+    activeRoute = { path, target: sweepUuid, label, step: 0 };
+    _updateRouteHud();
+
+    // Open minimap if closed so the user can see the route
+    if (minimapPanel && minimapPanel.style.display === "none") {
+      minimapPanel.style.display = "block";
+    }
+
+    // Walk the path step by step
+    for (let i = 1; i < path.length; i++) {
+      if (_routeAbort) {
+        appendLine("system", "Route cancelled.");
+        return;
+      }
+      activeRoute.step = i;
+      _updateRouteHud();
+      const isLast = i === path.length - 1;
+      try {
+        await sdk.Sweep.moveTo(path[i], {
+          transition: sdk.Sweep.Transition.FLY,
+          transitionTime: isLast ? 1800 : 600,
+        });
+      } catch (_) { /* ignore individual step failures */ }
+      if (!isLast) await sleep(100);
+    }
+
+    activeRoute = null;
+    _routeAbort = false;
+    _updateRouteHud();
+    appendLine("system", `✓ Arrived at ${label}.`);
+  }
+
+  // Direct single-jump — used internally (scan, auto-tag, highlight)
   async function handleNavigate(sweepUuid) {
     if (!sdk || !sdk.Sweep) {
       appendLine("system", "SDK not connected — cannot move.");
       return;
     }
     try {
-      console.log("[3DAgent] Navigating to sweep:", sweepUuid);
       await sdk.Sweep.moveTo(sweepUuid, {
         transition: sdk.Sweep.Transition.FLY,
-        transitionTime: 2000
+        transitionTime: 2000,
       });
-      appendLine("system", "✓ Moved to destination.");
-      console.log("[3DAgent] Navigation complete");
     } catch (e) {
-      console.error("[3DAgent] Navigation error:", e);
       appendLine("system", "Navigation failed: " + (e && e.message ? e.message : String(e)));
     }
   }
@@ -1495,7 +1647,41 @@
       scanSaveBtn.disabled = true;
       scanSaveBtn.textContent = "Saving...";
       try {
-        // Use the new confirm-edit endpoint with user-edited counts
+        // Wait for background bbox pre-fetch to finish so we can persist the data
+        if (_prefetchPromise) {
+          scanSaveBtn.textContent = "Saving…";
+          await _prefetchPromise;
+        }
+
+        // Build per-instance bbox data from the pre-fetched cache + scan view metadata.
+        // Instance #1 gets the primary detected bbox; additional instances share the
+        // same camera angle/sweep but don't have individual bbox positions.
+        const bbox_data = {};
+        Object.keys(editedCounts).forEach((assetName) => {
+          let bestView = null, bestCount = 0;
+          pendingScanViewData.forEach((view) => {
+            const c = view.objects[assetName] || 0;
+            if (c > bestCount) { bestCount = c; bestView = view; }
+          });
+          const absoluteAngle = bestView ? bestView.absolute_angle : null;
+          const viewSweep     = bestView ? (bestView.sweep_uuid || null) : null;
+          const instanceCount = editedCounts[assetName] || 1;
+          // tightBboxCache[name] is a plain [x1,y1,x2,y2] or null for the primary detection
+          const primaryBbox   = tightBboxCache[assetName] || null;
+
+          const instances = [];
+          for (let i = 0; i < instanceCount; i++) {
+            instances.push({
+              serial:     i + 1,
+              bbox:       i === 0 ? primaryBbox : null,  // only #1 has a precise position
+              angle:      absoluteAngle,
+              sweep_uuid: viewSweep,
+            });
+          }
+          bbox_data[assetName] = { instances };
+        });
+
+        // Use the new confirm-edit endpoint with user-edited counts + bbox data
         const res = await fetch("/api/scan-assets/confirm-edit", {
           method: "POST",
           headers: { "Content-Type": "application/json" },
@@ -1505,6 +1691,7 @@
             area_name: areaName,
             edited_assets: editedCounts,
             sweep_uuid: pendingScanSweepUuid || currentSweepUuid || "",
+            bbox_data,
           }),
         });
         const data = await res.json().catch(() => ({ ok: false, error: "Invalid response" }));
@@ -1644,7 +1831,7 @@
                   ${a.sweep_uuid ? `<span class="ap-row-uuid">${a.sweep_uuid.slice(0, 12)}…</span>` : ""}
                 </div>
                 <div class="ap-row-actions">
-                  ${a.sweep_uuid ? `<button type="button" class="btn small secondary ap-navigate-btn" data-uuid="${a.sweep_uuid}" title="Go here">▶</button>` : ""}
+                  ${a.sweep_uuid ? `<button type="button" class="btn small secondary ap-navigate-btn" data-uuid="${a.sweep_uuid}" data-label="${a.label_name}" title="Go here">▶</button>` : ""}
                   <button type="button" class="btn small danger ap-delete-asset-btn" data-id="${a.asset_id}" title="Delete">🗑</button>
                 </div>
               </div>`).join("")}
@@ -1720,7 +1907,7 @@
 
     // ── Wire: navigate buttons ──
     assetsPanelBody.querySelectorAll(".ap-navigate-btn").forEach(btn => {
-      btn.addEventListener("click", () => { handleNavigate(btn.dataset.uuid); closeAssetsPanel(); });
+      btn.addEventListener("click", () => { closeAssetsPanel(); navigateWithRoute(btn.dataset.uuid, btn.dataset.label || ""); });
     });
 
     // ── Wire: location delete ──
@@ -1745,16 +1932,92 @@
 
     async function showAreaDetail(area) {
       if (!invDetailRows) return;
-      invDetailRows.innerHTML = (areaMap[area] || []).map(s => `
-        <div class="ap-row">
-          <div class="ap-row-info">
-            <span class="ap-row-label" style="text-transform:capitalize;">${s.asset_name}</span>
+      // Group rows by asset_name so we can render a header + serial sub-rows
+      const rowsByAsset = {};
+      (areaMap[area] || []).forEach(s => {
+        const key = s.asset_name;
+        if (!rowsByAsset[key]) rowsByAsset[key] = [];
+        rowsByAsset[key].push(s);
+      });
+
+      invDetailRows.innerHTML = Object.entries(rowsByAsset).map(([assetName, rows]) => {
+        // Sort by serial_number so they appear in order
+        rows.sort((a, b) => (a.serial_number || 1) - (b.serial_number || 1));
+        const totalCount = rows.reduce((sum, r) => sum + (r.count || 1), 0);
+        const isLegacy = rows.length === 1 && !rows[0].serial_number;
+
+        // Helper: can we navigate to this row's recorded position?
+        const canNav = (s) => s.sweep_uuid && s.best_angle !== null && s.best_angle !== undefined;
+        const bboxAttr = (s) => s.bbox ? JSON.stringify(s.bbox) : "null";
+
+        if (isLegacy) {
+          // Old-format row (count > 1, no serial numbers) — still make it clickable if data is present
+          const s = rows[0];
+          return `
+          <div class="ap-asset-group">
+            <div class="ap-row">
+              <div class="ap-row-info">
+                <span class="ap-row-label" style="text-transform:capitalize;">${assetName}</span>
+              </div>
+              <div class="ap-row-actions">
+                <span class="ap-count">${totalCount}</span>
+                ${canNav(s) ? `<button type="button" class="btn small secondary ap-highlight-btn"
+                  data-name="${assetName}" data-sweep="${s.sweep_uuid}"
+                  data-angle="${s.best_angle}" data-bbox='${bboxAttr(s)}'
+                  title="Show in space">🔆</button>` : ""}
+                <button type="button" class="btn small danger ap-delete-summary-btn" data-id="${s.id}" title="Delete">🗑</button>
+              </div>
+            </div>
+          </div>`;
+        }
+
+        // New format: one row per instance with serial numbers
+        const subRows = rows.map(s => {
+          const label = `${assetName.charAt(0).toUpperCase() + assetName.slice(1)} #${s.serial_number || 1}`;
+          return `
+          <div class="ap-row ap-serial-row">
+            <div class="ap-row-info">
+              <span class="ap-row-label ap-serial-label">${label}</span>
+            </div>
+            <div class="ap-row-actions">
+              ${canNav(s)
+                ? `<button type="button" class="btn small secondary ap-highlight-btn"
+                    data-name="${assetName}" data-sweep="${s.sweep_uuid}"
+                    data-angle="${s.best_angle}" data-bbox='${bboxAttr(s)}'
+                    data-serial="${s.serial_number || 1}"
+                    title="Show ${label} in space">🔆</button>`
+                : `<span class="ap-no-loc" title="Location not recorded">—</span>`}
+              <button type="button" class="btn small danger ap-delete-summary-btn" data-id="${s.id}" title="Delete ${label}">🗑</button>
+            </div>
+          </div>`;
+        }).join("");
+
+        return `
+        <div class="ap-asset-group">
+          <div class="ap-asset-group-header">
+            <span style="text-transform:capitalize; font-weight:600;">${assetName}</span>
+            <span class="ap-count">${totalCount}</span>
           </div>
-          <div class="ap-row-actions">
-            <span class="ap-count">${s.count}</span>
-            <button type="button" class="btn small danger ap-delete-summary-btn" data-id="${s.id}" title="Delete">🗑</button>
-          </div>
-        </div>`).join("");
+          ${subRows}
+        </div>`;
+      }).join("");
+
+      // Wire: highlight button — navigate to stored sweep + rotate + show stored bbox
+      invDetailRows.querySelectorAll(".ap-highlight-btn").forEach(btn => {
+        btn.addEventListener("click", async () => {
+          const sweepUuid  = btn.dataset.sweep;
+          const angle      = parseFloat(btn.dataset.angle);
+          const bbox       = JSON.parse(btn.dataset.bbox);
+          const assetName  = btn.dataset.name;
+
+          closeAssetsPanel();
+          await handleNavigate(sweepUuid);
+          await sleep(1200);
+          try { await rotateToYawAtCurrentSweep(angle, 0); } catch (_) {}
+          if (scanHighlightOverlay) scanHighlightOverlay.style.display = "block";
+          showHighlightOverlay(assetName, bbox);
+        });
+      });
 
       invDetailRows.querySelectorAll(".ap-delete-summary-btn").forEach(btn => {
         btn.addEventListener("click", async () => {
@@ -1856,6 +2119,9 @@
 
   if (assetsPanelOpen)  assetsPanelOpen.addEventListener("click", openAssetsPanel);
   if (assetsPanelClose) assetsPanelClose.addEventListener("click", closeAssetsPanel);
+
+  const routeHudCancel = document.getElementById("route-hud-cancel");
+  if (routeHudCancel) routeHudCancel.addEventListener("click", clearRoute);
 
   // ── Shared helper: refresh scan-location dropdown + open assets panel ────────
 
@@ -2019,6 +2285,104 @@
     }
   }
 
+  // Draw the active route as a glowing blue path + amber destination pin.
+  // Called from renderMinimap after _drawFloorPlan so it renders on top.
+  function _drawRouteOverlay(ctx, proj, dotR) {
+    if (!activeRoute || !activeRoute.path || activeRoute.path.length < 2) return;
+
+    const path  = activeRoute.path;
+    const step  = activeRoute.step || 0;
+
+    // ── 1. Glow path line ────────────────────────────────────────────────────
+    // Passed segment (dimmer blue)
+    ctx.save();
+    ctx.lineCap     = "round";
+    ctx.lineJoin    = "round";
+    ctx.lineWidth   = Math.max(2, dotR * 1.4);
+    ctx.strokeStyle = "rgba(59,130,246,0.35)";
+    ctx.shadowColor = "#3b82f6";
+    ctx.shadowBlur  = 6;
+    ctx.beginPath();
+    let started = false;
+    for (let i = 0; i <= Math.min(step, path.length - 1); i++) {
+      const sd = allSweepData[path[i]];
+      if (!sd || !sd.position) { started = false; continue; }
+      const pt = proj.toCanvas(sd.position);
+      if (!started) { ctx.moveTo(pt.x, pt.y); started = true; }
+      else ctx.lineTo(pt.x, pt.y);
+    }
+    ctx.stroke();
+
+    // Upcoming segment (bright blue glow)
+    ctx.strokeStyle = "#3b82f6";
+    ctx.shadowBlur  = 12;
+    ctx.lineWidth   = Math.max(2.5, dotR * 1.6);
+    ctx.beginPath();
+    started = false;
+    for (let i = Math.max(0, step); i < path.length; i++) {
+      const sd = allSweepData[path[i]];
+      if (!sd || !sd.position) { started = false; continue; }
+      const pt = proj.toCanvas(sd.position);
+      if (!started) { ctx.moveTo(pt.x, pt.y); started = true; }
+      else ctx.lineTo(pt.x, pt.y);
+    }
+    ctx.stroke();
+    ctx.restore();
+
+    // ── 2. Waypoint dots (skip start & destination) ─────────────────────────
+    for (let i = 1; i < path.length - 1; i++) {
+      const sd = allSweepData[path[i]];
+      if (!sd || !sd.position) continue;
+      const pt      = proj.toCanvas(sd.position);
+      const passed  = i < step;
+      ctx.beginPath();
+      ctx.arc(pt.x, pt.y, dotR * 1.1, 0, Math.PI * 2);
+      ctx.fillStyle = passed ? "rgba(59,130,246,0.45)" : "#3b82f6";
+      ctx.fill();
+    }
+
+    // ── 3. Destination pin (amber) ──────────────────────────────────────────
+    const destSd = allSweepData[activeRoute.target];
+    if (destSd && destSd.position) {
+      const pt = proj.toCanvas(destSd.position);
+      ctx.save();
+      ctx.shadowColor = "#f59e0b";
+      ctx.shadowBlur  = 16;
+      // outer ring
+      ctx.beginPath();
+      ctx.arc(pt.x, pt.y, dotR * 3, 0, Math.PI * 2);
+      ctx.fillStyle = "rgba(245,158,11,0.25)";
+      ctx.fill();
+      // pin dot
+      ctx.beginPath();
+      ctx.arc(pt.x, pt.y, dotR * 2, 0, Math.PI * 2);
+      ctx.fillStyle = "#f59e0b";
+      ctx.fill();
+      // white centre
+      ctx.beginPath();
+      ctx.arc(pt.x, pt.y, dotR * 0.8, 0, Math.PI * 2);
+      ctx.fillStyle = "#ffffff";
+      ctx.fill();
+      ctx.restore();
+    }
+
+    // ── 4. Destination label ─────────────────────────────────────────────────
+    if (destSd && destSd.position) {
+      const pt  = proj.toCanvas(destSd.position);
+      const lbl = activeRoute.label.length > 16
+        ? activeRoute.label.slice(0, 14) + "…"
+        : activeRoute.label;
+      ctx.save();
+      ctx.font        = "bold 9px Inter,sans-serif";
+      ctx.textAlign   = "center";
+      ctx.fillStyle   = "#f59e0b";
+      ctx.shadowColor = "rgba(0,0,0,0.95)";
+      ctx.shadowBlur  = 5;
+      ctx.fillText(lbl, pt.x, pt.y - dotR * 3 - 3);
+      ctx.restore();
+    }
+  }
+
   function renderMinimap() {
     if (!minimapCanvas) return;
     var sweeps = _getVisibleSweeps();
@@ -2041,6 +2405,7 @@
 
     var proj = _computeProjection(sweeps, W, H, 20);
     _drawFloorPlan(ctx, sweeps, proj, 3, true, 8, currentSweepUuid);
+    _drawRouteOverlay(ctx, proj, 3);
 
     // Floor label if multiple floors exist
     var floorKeys = Object.keys(floorDataMap);
@@ -2473,7 +2838,7 @@
         }
       } else if (data.intent === "navigate" && data.sweep_uuid) {
         appendLine("agent", "Navigating to " + (data.label || "destination") + "…");
-        await handleNavigate(data.sweep_uuid);
+        await navigateWithRoute(data.sweep_uuid, data.label || "destination");
       } else if (data.response) {
         appendLine("agent", data.response);
       } else {

@@ -637,6 +637,8 @@ def confirm_edit_scan_assets():
     area_name = (data.get("area_name") or "").strip() or None
     edited_counts = data.get("edited_assets") or {}  # User-modified counts
     sweep_uuid = (data.get("sweep_uuid") or "").strip() or None
+    # {asset_name: {bbox: [x1,y1,x2,y2], angle: float, sweep_uuid: str}}
+    bbox_data = data.get("bbox_data") or {}
 
     try:
         map_id = int(map_id)
@@ -664,21 +666,36 @@ def confirm_edit_scan_assets():
             cleaned_count = int(count)
         except (TypeError, ValueError):
             continue
-        if cleaned_count <= 0:  # Skip items with 0 or negative count
+        if cleaned_count <= 0:
             continue
 
-        row = AssetsSummary(
-            map_id=map_id,
-            area_name=area_name,
-            asset_name=cleaned_name,
-            count=cleaned_count,
-        )
-        db.session.add(row)
+        # bbox_data may carry per-instance info: {instances: [{serial, bbox, angle, sweep_uuid}]}
+        asset_bbox_info = bbox_data.get(cleaned_name) or {}
+        instances = asset_bbox_info.get("instances") or []
+
+        for serial in range(1, cleaned_count + 1):
+            inst = instances[serial - 1] if serial - 1 < len(instances) else {}
+            raw_bbox  = inst.get("bbox")
+            raw_angle = inst.get("angle")
+            row_sweep = (inst.get("sweep_uuid") or sweep_uuid or "").strip() or None
+
+            row = AssetsSummary(
+                map_id=map_id,
+                area_name=area_name,
+                asset_name=cleaned_name,
+                count=1,
+                serial_number=serial,
+                sweep_uuid=row_sweep,
+                bbox_json=json.dumps(raw_bbox) if isinstance(raw_bbox, list) else None,
+                best_angle=float(raw_angle) if raw_angle is not None else None,
+            )
+            db.session.add(row)
+
         saved_rows.append({"asset_name": cleaned_name, "count": cleaned_count})
 
     db.session.commit()
 
-    # Persist a history snapshot so change-detection works across scans
+    # Persist a history snapshot (aggregate counts, not per-instance)
     if saved_rows:
         snapshot_dict = {r["asset_name"]: r["count"] for r in saved_rows}
         db.session.add(ScanHistory(
@@ -723,6 +740,32 @@ def locate_object():
 
     bbox = groq_service.locate_object_in_image(image_b64, object_name)
     return jsonify({"ok": True, "bbox": bbox})
+
+
+@bp.route("/locate-all-instances", methods=["POST"])
+@api_login_required
+def locate_all_instances():
+    """Return tight bounding boxes for every visible instance of a named object.
+    Returns {ok, instances: [[x1,y1,x2,y2], ...]} — up to expected_count entries."""
+    data = request.get_json(silent=True) or {}
+    object_name    = (data.get("object_name") or "").strip().lower()
+    image_b64      = data.get("image_base64") or ""
+    expected_count = data.get("expected_count") or 1
+
+    if not object_name:
+        return jsonify({"ok": False, "error": "object_name required"}), 400
+    if not image_b64:
+        return jsonify({"ok": False, "error": "image_base64 required"}), 400
+    try:
+        expected_count = max(1, int(expected_count))
+    except (TypeError, ValueError):
+        expected_count = 1
+
+    if not current_app.config.get("GROQ_API_KEY"):
+        return jsonify({"ok": True, "instances": []})
+
+    instances = groq_service.locate_all_instances_in_image(image_b64, object_name, expected_count)
+    return jsonify({"ok": True, "instances": instances})
 
 
 @bp.route("/scan-assets/locations", methods=["GET"])
@@ -1003,7 +1046,11 @@ def assets_panel_data(map_id):
                 "id": s.id,
                 "area_name": s.area_name or "Unspecified",
                 "asset_name": s.asset_name,
+                "serial_number": s.serial_number,
                 "count": s.count,
+                "sweep_uuid": s.sweep_uuid,
+                "bbox": json.loads(s.bbox_json) if s.bbox_json else None,
+                "best_angle": s.best_angle,
             }
             for s in summaries
         ],

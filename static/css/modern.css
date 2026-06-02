@@ -1304,6 +1304,72 @@ label {
   color: var(--accent-primary);
 }
 
+/* ── Scan modal overlay (replaces the old inline scan-review-panel) ── */
+.scan-modal-overlay {
+  position: fixed;
+  inset: 0;
+  z-index: 60;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  background: rgba(0, 0, 0, 0.58);
+  backdrop-filter: blur(3px);
+  -webkit-backdrop-filter: blur(3px);
+}
+
+.scan-modal-box {
+  position: relative;
+  width: min(600px, 92vw);
+  max-height: 84vh;
+  background: var(--surface-1);
+  border: 1px solid var(--border);
+  border-radius: var(--radius-lg);
+  padding: 1.5rem 1.5rem 1.25rem;
+  display: flex;
+  flex-direction: column;
+  gap: 0.8rem;
+  overflow: hidden;
+  box-shadow: 0 24px 64px rgba(0, 0, 0, 0.55);
+}
+
+.scan-modal-narrow {
+  width: min(360px, 92vw);
+}
+
+.scan-modal-header {
+  display: flex;
+  align-items: flex-start;
+  justify-content: space-between;
+  gap: 0.75rem;
+  padding-bottom: 0.85rem;
+  border-bottom: 1px solid var(--border);
+  flex-shrink: 0;
+}
+
+.scan-modal-header strong {
+  font-size: 1rem;
+  color: var(--text-primary);
+}
+
+.scan-modal-location-row {
+  display: flex;
+  flex-direction: column;
+  gap: 0.4rem;
+  flex-shrink: 0;
+}
+
+.scan-modal-location-row select,
+.scan-modal-location-row input[type="text"] {
+  width: 100%;
+  padding: 6px 10px;
+  font-size: 0.82rem;
+  border-radius: var(--radius-sm);
+  border: 1px solid var(--border);
+  background: var(--surface-2);
+  color: var(--text-primary);
+}
+
+/* Legacy class kept for backward compat — not applied to the new modals */
 .scan-review-panel {
   margin: 5px 8px;
   padding: 8px 10px;
@@ -1354,9 +1420,10 @@ label {
   flex-direction: column;
   gap: 6px;
   margin-bottom: 6px;
-  max-height: 150px;
+  max-height: 420px;
   overflow-y: auto;
   font-size: 0.8rem;
+  flex: 1 1 auto;
 }
 
 .scan-review-item {
@@ -2205,6 +2272,41 @@ label {
   text-align: center;
 }
 
+/* Serialised asset groups inside area detail */
+.ap-asset-group {
+  margin-bottom: 0.6rem;
+  border: 1px solid var(--border-light);
+  border-radius: var(--radius-md);
+  overflow: hidden;
+}
+
+.ap-asset-group-header {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  padding: 0.35rem 0.6rem;
+  background: rgba(255,255,255,0.04);
+  font-size: 0.82rem;
+  color: var(--text-secondary);
+  border-bottom: 1px solid var(--border-light);
+}
+
+.ap-serial-row {
+  padding-left: 1.1rem;
+  border-top: 1px solid var(--border-light);
+}
+
+.ap-serial-label {
+  font-size: 0.82rem;
+  color: var(--text-secondary);
+}
+
+.ap-no-loc {
+  font-size: 0.75rem;
+  color: var(--text-muted);
+  padding: 0 0.35rem;
+}
+
 .ap-add-form {
   display: flex;
   flex-direction: column;
@@ -2536,5 +2638,88 @@ label {
 
 .scan-item-name.scan-item-clickable:hover {
   color: var(--accent-primary-light);
+}
+
+/* ── Route HUD — floating badge shown during active route navigation ── */
+
+#route-hud {
+  position: absolute;
+  bottom: 80px;
+  left: 16px;
+  z-index: 25;
+  display: flex;
+  align-items: center;
+  gap: 10px;
+  background: rgba(13, 17, 26, 0.92);
+  border: 1px solid rgba(59, 130, 246, 0.55);
+  border-radius: 10px;
+  padding: 8px 12px;
+  backdrop-filter: blur(8px);
+  box-shadow:
+    0 0 0 1px rgba(59, 130, 246, 0.2),
+    0 0 18px rgba(59, 130, 246, 0.25),
+    0 4px 16px rgba(0, 0, 0, 0.5);
+  animation: route-hud-in 0.22s ease-out;
+  pointer-events: auto;
+  min-width: 160px;
+}
+
+@keyframes route-hud-in {
+  from { opacity: 0; transform: translateY(8px); }
+  to   { opacity: 1; transform: translateY(0);   }
+}
+
+.route-hud-info {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  flex: 1;
+  min-width: 0;
+}
+
+.route-hud-icon {
+  font-size: 14px;
+  flex-shrink: 0;
+}
+
+.route-hud-text {
+  display: flex;
+  flex-direction: column;
+  min-width: 0;
+}
+
+#route-hud-label {
+  font-size: 0.78rem;
+  font-weight: 600;
+  color: var(--text-primary);
+  white-space: nowrap;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  max-width: 140px;
+}
+
+.route-hud-step {
+  font-size: 0.7rem;
+  color: #3b82f6;
+  font-variant-numeric: tabular-nums;
+  margin-top: 1px;
+}
+
+.route-hud-cancel {
+  background: none;
+  border: none;
+  color: var(--text-muted);
+  cursor: pointer;
+  font-size: 12px;
+  padding: 2px 4px;
+  border-radius: 4px;
+  line-height: 1;
+  flex-shrink: 0;
+  transition: color 120ms, background 120ms;
+}
+
+.route-hud-cancel:hover {
+  color: var(--danger);
+  background: rgba(239, 68, 68, 0.12);
 }
 .btn.btn-large  { padding: 0.875rem 1.5rem; font-size: 1rem;   }

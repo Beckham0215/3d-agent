@@ -52,12 +52,18 @@ def create_app():
 
     with app.app_context():
         db.create_all()
-        # Add sweep_uuid column to assets_summary if it was created before this column existed
-        try:
-            with db.engine.connect() as conn:
-                conn.execute(db.text("ALTER TABLE assets_summary ADD COLUMN sweep_uuid VARCHAR(64)"))
-                conn.commit()
-        except Exception:
-            pass  # Column already exists
+        # Add columns to assets_summary that were introduced after initial schema
+        for _ddl in [
+            "ALTER TABLE assets_summary ADD COLUMN sweep_uuid VARCHAR(64)",
+            "ALTER TABLE assets_summary ADD COLUMN bbox_json TEXT",
+            "ALTER TABLE assets_summary ADD COLUMN best_angle REAL",
+            "ALTER TABLE assets_summary ADD COLUMN serial_number INTEGER DEFAULT 1",
+        ]:
+            try:
+                with db.engine.connect() as conn:
+                    conn.execute(db.text(_ddl))
+                    conn.commit()
+            except Exception:
+                pass  # Column already exists
 
     return app

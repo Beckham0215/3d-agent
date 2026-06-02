@@ -473,6 +473,73 @@ def locate_all_objects_in_image(image_b64: str, object_names: list) -> dict:
         return {}
 
 
+def locate_all_instances_in_image(image_b64: str, object_name: str, expected_count: int) -> list:
+    """
+    Return tight bounding boxes for every visible instance of object_name in the image.
+    Returns a list of up to expected_count [x1,y1,x2,y2] (normalised 0-1); missing slots are None.
+    """
+    if not image_b64 or not object_name or expected_count < 1:
+        return []
+
+    if "," in image_b64:
+        image_b64 = image_b64.split(",", 1)[1]
+
+    prompt = (
+        f"Find ALL visible '{object_name}' objects in this image. "
+        f"There may be up to {expected_count} of them. "
+        "For each one you can clearly see, output a tight bounding box as a JSON array "
+        "[x1, y1, x2, y2] with normalised coordinates 0.0–1.0 where (0,0) is top-left. "
+        f"Return ONLY a JSON array of arrays, e.g. [[0.1,0.2,0.5,0.8],[0.6,0.1,0.9,0.7]]. "
+        f"If none are visible reply with exactly: []"
+    )
+
+    try:
+        completion = _client().chat.completions.create(
+            model="meta-llama/llama-4-scout-17b-16e-instruct",
+            messages=[{
+                "role": "user",
+                "content": [
+                    {"type": "image_url", "image_url": {"url": f"data:image/jpeg;base64,{image_b64}"}},
+                    {"type": "text", "text": prompt},
+                ],
+            }],
+            max_tokens=200,
+            temperature=0.1,
+        )
+        answer = (completion.choices[0].message.content or "").strip()
+        current_app.logger.info(f"[Groq AllInstances '{object_name}'] Raw: {answer}")
+
+        # Extract outer JSON array
+        m = re.search(r'\[\s*(?:\[[\d.,\s]+\]\s*,?\s*)*\]', answer)
+        if not m:
+            return []
+
+        raw = json.loads(m.group(0))
+        results = []
+        for bbox in raw[:expected_count]:
+            if not isinstance(bbox, list) or len(bbox) != 4:
+                continue
+            x1, y1, x2, y2 = [float(v) for v in bbox]
+            max_val = max(x1, y1, x2, y2)
+            if max_val > 1.5:
+                if max_val <= 1000:
+                    x1, y1, x2, y2 = x1 / 1000, y1 / 1000, x2 / 1000, y2 / 1000
+                else:
+                    x1, x2 = x1 / 1280, x2 / 1280
+                    y1, y2 = y1 / 720, y2 / 720
+            x1, x2 = sorted([max(0.0, min(1.0, x1)), max(0.0, min(1.0, x2))])
+            y1, y2 = sorted([max(0.0, min(1.0, y1)), max(0.0, min(1.0, y2))])
+            if (x2 - x1) >= 0.01 and (y2 - y1) >= 0.01:
+                results.append([round(x1, 3), round(y1, 3), round(x2, 3), round(y2, 3)])
+
+        current_app.logger.info(f"[Groq AllInstances '{object_name}'] Parsed {len(results)} bbox(es)")
+        return results
+
+    except Exception as e:
+        current_app.logger.exception(f"[Groq AllInstances] Failed for '{object_name}': {e}")
+        return []
+
+
 def suggest_location_name_from_image(image_b64: str) -> str | None:
     """Use vision model to suggest a room/area name from a 360° screenshot."""
     if not image_b64:

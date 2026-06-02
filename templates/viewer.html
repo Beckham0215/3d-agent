@@ -26,6 +26,18 @@
     <button type="button" class="sho-dismiss" id="sho-dismiss">&#xd7; Exit highlight</button>
   </div>
 
+  <!-- Route HUD — floats bottom-left while a route is active -->
+  <div id="route-hud" style="display:none;">
+    <div class="route-hud-info">
+      <span class="route-hud-icon">🗺</span>
+      <div class="route-hud-text">
+        <span id="route-hud-label"></span>
+        <span id="route-hud-step" class="route-hud-step"></span>
+      </div>
+    </div>
+    <button type="button" id="route-hud-cancel" class="route-hud-cancel" title="Cancel route">✕</button>
+  </div>
+
   <!-- Location Tracker Panel -->
   <div id="uuid-tracker" class="hud-panel">
     <div class="panel-header">
@@ -105,34 +117,6 @@
         <span>🔄 Connecting…</span>
       </div>
 
-      <!-- Scan Mode Picker -->
-      <div id="scan-mode-picker" class="scan-review-panel" style="display:none;">
-        <div class="scan-review-title">📷 Scan Area</div>
-        <div class="scan-review-instructions">Choose what to scan:</div>
-        <button type="button" id="scan-current-btn" class="btn secondary small btn-full">📍 Scan Current Sweep</button>
-        <p class="scan-divider-label">— or scan a tagged area —</p>
-        <select id="scan-category-select">
-          <option value="">Select area to scan…</option>
-        </select>
-        <button type="button" id="scan-whole-area-btn" class="btn secondary small btn-full">🔍 Scan Whole Area</button>
-        <button type="button" id="scan-mode-cancel-btn" class="btn ghost small btn-full">✕ Cancel</button>
-      </div>
-
-      <!-- Scan Review Panel -->
-      <div id="scan-review-panel" class="scan-review-panel" style="display:none;">
-        <div class="scan-review-title">Scan Results</div>
-        <div class="scan-review-instructions">Review and edit detected items:</div>
-        <div id="scan-review-list" class="scan-review-list"></div>
-        <select id="scan-location-select">
-          <option value="">Select existing location…</option>
-        </select>
-        <input type="text" id="scan-area-name-input" placeholder="Or type new area name…" autocomplete="off">
-        <div class="scan-review-actions">
-          <button type="button" id="scan-save-btn" class="btn success small">✓ Add to Assets</button>
-          <button type="button" id="scan-cancel-btn" class="btn ghost small">✕</button>
-        </div>
-      </div>
-
       <div id="chat-log" class="chat-log" role="log" aria-live="polite" aria-label="Chat messages"></div>
 
       <!-- Quick-action bar (Scan Area lives here, not in the input row) -->
@@ -192,6 +176,47 @@
       <div style="padding:1rem; color:var(--text-muted); font-size:0.85rem; text-align:center;">Loading…</div>
     </div>
   </aside>
+
+  <!-- Scan Mode Picker Modal -->
+  <div id="scan-mode-picker" class="scan-modal-overlay" style="display:none;">
+    <div class="scan-modal-box scan-modal-narrow">
+      <div class="scan-modal-header">
+        <strong>📷 Scan Area</strong>
+      </div>
+      <div class="scan-review-instructions">Choose what to scan:</div>
+      <button type="button" id="scan-current-btn" class="btn secondary small btn-full">📍 Scan Current Sweep</button>
+      <p class="scan-divider-label">— or scan a tagged area —</p>
+      <select id="scan-category-select">
+        <option value="">Select area to scan…</option>
+      </select>
+      <button type="button" id="scan-whole-area-btn" class="btn secondary small btn-full">🔍 Scan Whole Area</button>
+      <button type="button" id="scan-mode-cancel-btn" class="btn ghost small btn-full">✕ Cancel</button>
+    </div>
+  </div>
+
+  <!-- Scan Review Modal -->
+  <div id="scan-review-panel" class="scan-modal-overlay" style="display:none;">
+    <div class="scan-modal-box">
+      <div class="scan-modal-header">
+        <div>
+          <strong>🔍 Scan Results</strong>
+          <div class="scan-review-instructions" style="margin-top:4px;">Review and edit detected items, then save to a location.</div>
+        </div>
+        <button type="button" id="scan-cancel-btn" class="toggle-btn" title="Close">✕</button>
+      </div>
+      <div id="scan-review-list" class="scan-review-list"></div>
+      <div class="scan-modal-location-row">
+        <select id="scan-location-select">
+          <option value="">Select existing location…</option>
+        </select>
+        <input type="text" id="scan-area-name-input" placeholder="Or type new area name…" autocomplete="off">
+      </div>
+      <div class="scan-review-actions">
+        <button type="button" id="scan-save-btn" class="btn success small">✓ Add to Assets</button>
+      </div>
+    </div>
+  </div>
+
 </div>
 
 <script>

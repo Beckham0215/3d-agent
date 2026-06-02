@@ -59,6 +59,9 @@ class AssetsSummary(db.Model):
     asset_name = db.Column(db.String(100), nullable=False, index=True)
     count = db.Column(db.Integer, nullable=False, default=0)
     sweep_uuid = db.Column(db.String(64), nullable=True)
+    serial_number = db.Column(db.Integer, nullable=True, default=1)  # 1-indexed per asset_name per area
+    bbox_json = db.Column(db.Text, nullable=True)    # JSON: [x1,y1,x2,y2] normalised 0-1
+    best_angle = db.Column(db.Float, nullable=True)  # absolute camera yaw in degrees
     created_at = db.Column(db.DateTime, default=datetime.utcnow, nullable=False)
 
 
