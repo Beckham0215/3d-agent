@@ -67,8 +67,8 @@
         <span class="tool-btn-icon">📷</span><span>Scan Area</span>
       </button>
 
-      <button type="button" id="tag-location-btn" class="tool-btn" title="Tag the current location">
-        <span class="tool-btn-icon">🏷️</span><span>Tag Location</span>
+      <button type="button" id="location-btn" class="tool-btn" title="Tag, edit and navigate to locations">
+        <span class="tool-btn-icon">📍</span><span>Location</span>
       </button>
 
       <button type="button" id="auto-tag-btn" class="tool-btn"
@@ -77,12 +77,12 @@
       </button>
       <div id="auto-tag-status" class="toolbar-status"></div>
 
-      <button type="button" id="assets-panel-open" class="tool-btn" title="View tagged & scanned assets">
-        <span class="tool-btn-icon">📍</span><span>Assets</span>
+      <button type="button" id="assets-panel-open" class="tool-btn" title="View scanned asset inventory">
+        <span class="tool-btn-icon">📦</span><span>Assets</span>
       </button>
 
-      <button type="button" id="export-plan-btn" class="tool-btn" title="Export annotated floor plan">
-        <span class="tool-btn-icon">⬇</span><span>Export Plan</span>
+      <button type="button" id="export-btn" class="tool-btn" title="Export floor plan, locations or assets">
+        <span class="tool-btn-icon">⬇</span><span>Export</span>
       </button>
 
       <div class="toolbar-divider"></div>
@@ -94,6 +94,11 @@
         <span class="tool-btn-icon">⚠️</span><span>Report Issue</span>
       </button>
 
+      <button type="button" id="problems-btn" class="tool-btn tool-btn--warn"
+              title="Show reported faulty equipment — click to fly to & outline each">
+        <span class="tool-btn-icon">🔧</span><span>Problem Equipment</span>
+      </button>
+
       <div class="toolbar-divider"></div>
 
       <a href="{{ url_for('main.dashboard') }}" class="tool-btn" title="Back to dashboard">
@@ -102,40 +107,33 @@
     </div>
   </aside>
 
-  <!-- Tag Location popover (opened by the rail's Tag Location button) -->
-  <div id="tag-popover" class="tool-popover" style="display:none;" role="dialog" aria-label="Tag location">
-    <div class="tool-popover-header">
-      <strong>🏷️ Tag this location</strong>
-      <button type="button" id="tag-popover-close" class="toggle-btn" title="Close">✕</button>
-    </div>
-    <form id="quick-asset-form">
-      <input
-        type="text"
-        id="quick-asset-name"
-        placeholder="Location name (e.g., Kitchen)"
-        required
-        autocomplete="off"
-      >
-      <input
-        type="text"
-        id="quick-asset-category"
-        placeholder="Category (e.g., Room)"
-        autocomplete="off"
-      >
-      <button type="submit" id="quick-asset-btn" class="btn primary full">✓ Save Location</button>
-    </form>
-    <div id="quick-asset-status" class="toolbar-status"></div>
-  </div>
-
-  <!-- Report Issue popover (opened by the rail's Report Issue button) -->
-  <div id="report-popover" class="tool-popover" style="display:none;" role="dialog" aria-label="Report maintenance issue">
+  <!-- Report Issue popover — interactive: location → asset → describe -->
+  <div id="report-popover" class="tool-popover report-popover" style="display:none;" role="dialog" aria-label="Report maintenance issue">
     <div class="tool-popover-header">
       <strong>⚠️ Report an issue</strong>
       <button type="button" id="report-popover-close" class="toggle-btn" title="Close">✕</button>
     </div>
-    <form id="report-issue-form">
-      <input type="text" id="report-equipment" placeholder="Equipment (e.g., AC unit, Elevator)" required autocomplete="off">
-      <textarea id="report-description" placeholder="Describe the problem (optional)" rows="3"></textarea>
+
+    <!-- Step 1: pick a location -->
+    <div class="report-step">
+      <div class="report-step-label">1 · Location</div>
+      <select id="report-location-select">
+        <option value="">Choose a location…</option>
+      </select>
+      <div id="report-no-assets" class="report-hint" style="display:none;">No scanned assets yet — choose “Other / general issue”.</div>
+    </div>
+
+    <!-- Step 2: pick the asset (flies to & outlines it) -->
+    <div id="report-asset-step" class="report-step" style="display:none;">
+      <div class="report-step-label">2 · Asset <span class="report-hint">— click to fly &amp; outline it</span></div>
+      <div id="report-asset-list" class="report-asset-list"></div>
+    </div>
+
+    <!-- Step 3: describe -->
+    <form id="report-issue-form" class="report-step" style="display:none;">
+      <div class="report-step-label">3 · Describe the issue</div>
+      <input type="text" id="report-equipment" placeholder="Asset / equipment name" required autocomplete="off">
+      <textarea id="report-description" placeholder="What's wrong? (optional)" rows="3"></textarea>
       <label class="report-sev-field">
         <span>Severity</span>
         <select id="report-severity">
@@ -148,6 +146,47 @@
       <button type="submit" class="btn primary full">⚠ Submit Report</button>
     </form>
     <div id="report-status" class="toolbar-status"></div>
+  </div>
+
+  <!-- Export popover (opened by the rail's Export button) -->
+  <div id="export-popover" class="tool-popover" style="display:none;" role="dialog" aria-label="Export">
+    <div class="tool-popover-header">
+      <strong>⬇ Export</strong>
+      <button type="button" id="export-popover-close" class="toggle-btn" title="Close">✕</button>
+    </div>
+
+    <div class="export-group">
+      <div class="export-group-title">🗺 Floor plan</div>
+      <button type="button" id="export-floorplan-btn" class="btn secondary small btn-full">Annotated plan (PNG / PDF)…</button>
+    </div>
+
+    <div class="export-group">
+      <div class="export-group-title">📍 Locations</div>
+      <div class="export-row">
+        <a href="{{ url_for('main.export_locations_csv', map_id=space.map_id) }}" target="_blank" class="btn ghost small">⬇️ CSV</a>
+        <a href="{{ url_for('main.export_locations_pdf', map_id=space.map_id) }}" target="_blank" class="btn ghost small">📄 PDF</a>
+      </div>
+    </div>
+
+    <div class="export-group">
+      <div class="export-group-title">📦 Assets</div>
+      <div class="export-row">
+        <a href="{{ url_for('main.export_csv', map_id=space.map_id) }}" target="_blank" class="btn ghost small">⬇️ CSV</a>
+        <a href="{{ url_for('main.export_pdf', map_id=space.map_id) }}" target="_blank" class="btn ghost small">📄 PDF</a>
+      </div>
+    </div>
+  </div>
+
+  <!-- Problem Equipment popover (opened by the Maintenance "Problem Equipment" button) -->
+  <div id="problems-popover" class="tool-popover report-popover" style="display:none;" role="dialog" aria-label="Problem equipment">
+    <div class="tool-popover-header">
+      <strong>🔧 Problem Equipment</strong>
+      <button type="button" id="problems-popover-close" class="toggle-btn" title="Close">✕</button>
+    </div>
+    <div class="report-hint">Reported faulty assets in this space — worst first. Click one to fly to it &amp; outline it.</div>
+    <div id="problems-list" class="report-asset-list" style="max-height:240px; margin-top:6px;">
+      <div class="ap-empty">Loading…</div>
+    </div>
   </div>
 
   <!-- Scan Results — its own draggable panel (opens from Scan Area, not the chat) -->
@@ -228,11 +267,11 @@
     </div>
   </div>
 
-  <!-- In-viewer Assets Panel -->
-  <aside id="assets-panel" class="assets-panel" style="display:none;" aria-label="Assets dashboard">
+  <!-- In-viewer Assets Panel — scanned inventory only -->
+  <aside id="assets-panel" class="assets-panel" style="display:none;" aria-label="Scanned assets">
     <header class="assets-panel-header">
       <div style="display:flex; align-items:center; gap:8px;">
-        <strong style="font-size:0.95rem;">📍 Assets</strong>
+        <strong style="font-size:0.95rem;">📦 Scanned Assets</strong>
       </div>
       <div style="display:flex; gap:6px; align-items:center;">
         <a href="{{ url_for('main.export_csv', map_id=space.map_id) }}" target="_blank" class="btn ghost small" title="Download CSV">⬇️ CSV</a>
@@ -243,6 +282,27 @@
     </header>
     <div id="assets-panel-body" class="assets-panel-body">
       <div style="padding:1rem; color:var(--text-muted); font-size:0.85rem; text-align:center;">Loading…</div>
+    </div>
+  </aside>
+
+  <!-- In-viewer Location Panel — tag + manage navigation locations (CRUD + navigate) -->
+  <aside id="location-panel" class="assets-panel" style="display:none;" aria-label="Navigation locations">
+    <header class="assets-panel-header">
+      <div style="display:flex; align-items:center; gap:8px;">
+        <strong style="font-size:0.95rem;">📍 Locations</strong>
+      </div>
+      <button type="button" id="location-panel-close" class="toggle-btn" title="Close panel" style="font-size:1rem; line-height:1;">✕</button>
+    </header>
+    <div class="assets-panel-body">
+      <form id="quick-asset-form" class="ap-add-form">
+        <input type="text" id="quick-asset-name" placeholder="Location name (e.g. Kitchen 1)" required autocomplete="off">
+        <input type="text" id="quick-asset-category" placeholder="Category (e.g. Kitchen)" autocomplete="off">
+        <button type="submit" id="quick-asset-btn" class="btn primary small" style="width:100%;">✓ Tag current location</button>
+      </form>
+      <div id="quick-asset-status" class="toolbar-status"></div>
+      <div id="location-list-body">
+        <div class="ap-empty">Loading…</div>
+      </div>
     </div>
   </aside>
 
@@ -300,7 +360,7 @@
 </script>
 <script>
   /* @ts-nocheck */
-  /* Rail popovers (Tag Location, Report Issue) — open/close toggles. */
+  /* Rail popover (Report Issue) — open/close toggle. */
   (function () {
     function wirePopover(btnId, popId, closeId, focusId) {
       var btn   = document.getElementById(btnId);
@@ -341,8 +401,9 @@
       popovers.forEach(function (p) { if (p && p !== except) p.close(); });
     }
 
-    popovers.push(wirePopover("tag-location-btn", "tag-popover", "tag-popover-close", "quick-asset-name"));
-    popovers.push(wirePopover("report-issue-btn", "report-popover", "report-popover-close", "report-equipment"));
+    popovers.push(wirePopover("report-issue-btn", "report-popover", "report-popover-close", "report-location-select"));
+    popovers.push(wirePopover("export-btn", "export-popover", "export-popover-close", null));
+    popovers.push(wirePopover("problems-btn", "problems-popover", "problems-popover-close", null));
   })();
 </script>
 <script src="{{ url_for('static', filename='js/panel-controls.js') }}"></script>

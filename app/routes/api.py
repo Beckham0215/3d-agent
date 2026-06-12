@@ -483,6 +483,99 @@ def vla():
         _log_chat(uid, map_id, message, fallback)
         return jsonify({"ok": True, "intent": "chat", "response": fallback})
 
+    if intent == "report_issue":
+        spec = groq_service.parse_report_request(message)
+        equipment = (spec.get("asset") or routed.get("asset_name") or "").strip()
+        description = (spec.get("description") or "").strip()
+        severity = spec.get("severity") or "medium"
+        if not equipment:
+            reply = "I can file a maintenance report, but I couldn't tell which asset. Try: 'report chair #1 has a broken leg'."
+            _log_chat(uid, map_id, message, reply)
+            return jsonify({"ok": True, "intent": "chat", "response": reply})
+
+        # Locate the asset in the scanned inventory so the report pins to its exact spot.
+        m = re.match(r"^(.*?)\s*#?\s*(\d+)\s*$", equipment)
+        base = (m.group(1) if m else equipment).strip().lower()
+        serial = int(m.group(2)) if m else None
+        rows = AssetsSummary.query.filter_by(map_id=map_id).all()
+        match = next((r for r in rows if (r.asset_name or "").lower() == base and (serial is None or r.serial_number == serial)), None)
+        if not match and base:
+            match = next((r for r in rows if base in (r.asset_name or "").lower() and (serial is None or r.serial_number == serial)), None)
+
+        sweep_uuid = match.sweep_uuid if match else (current_sweep_uuid or None)
+        area_name = match.area_name if match else None
+        best_angle = match.best_angle if match else None
+        bbox_json = (json.loads(match.bbox_json) if (match and match.bbox_json) else None)
+        if not area_name and current_sweep_uuid:
+            tag = Asset.query.filter_by(map_id=map_id, sweep_uuid=current_sweep_uuid).first()
+            if tag:
+                area_name = tag.label_name
+
+        equipment_label = f"{base.title()} #{serial}" if serial else equipment
+        user = db.session.get(User, uid)
+        report = MaintenanceReport(
+            map_id=map_id,
+            sweep_uuid=sweep_uuid,
+            area_name=area_name,
+            equipment_name=equipment_label,
+            description=description or None,
+            severity=severity,
+            status="open",
+            reported_by=uid,
+            reporter_name=user.username if user else None,
+        )
+        db.session.add(report)
+        db.session.commit()
+
+        loc_txt = f" in {area_name}" if area_name else ""
+        reply = (f"✓ Logged a {severity} maintenance report for {equipment_label}{loc_txt}"
+                 + (f": {description}." if description else "."))
+        _log_chat(uid, map_id, message, reply)
+        return jsonify({
+            "ok": True,
+            "intent": "report_issue",
+            "response": reply,
+            "report_id": report.id,
+            "equipment_name": equipment_label,
+            "severity": severity,
+            "navigate": ({
+                "sweep_uuid": sweep_uuid,
+                "equipment_name": equipment_label,
+                "best_angle": best_angle,
+                "bbox": bbox_json,
+            } if sweep_uuid else None),
+        })
+
+    if intent == "list_problems":
+        rank = {"critical": 4, "high": 3, "medium": 2, "low": 1}
+        reports = MaintenanceReport.query.filter(
+            MaintenanceReport.map_id == map_id,
+            MaintenanceReport.status != "resolved",
+        ).all()
+        if not reports:
+            reply = "No open maintenance problems have been reported in this space. 🎉"
+            _log_chat(uid, map_id, message, reply)
+            return jsonify({"ok": True, "intent": "chat", "response": reply})
+        reports.sort(key=lambda r: (-rank.get(r.severity, 2), -r.id))
+        parts = []
+        for r in reports[:20]:
+            loc = f" ({r.area_name})" if r.area_name else ""
+            status_txt = "" if r.status == "open" else f" / {r.status}"
+            parts.append(f"{r.equipment_name}{loc} — {r.severity}{status_txt}")
+        reply = (f"{len(reports)} reported problem(s): " + "; ".join(parts)
+                 + ". Open “Problem Equipment” in the tools menu to fly to each one.")
+        _log_chat(uid, map_id, message, reply)
+        return jsonify({
+            "ok": True,
+            "intent": "list_problems",
+            "response": reply,
+            "problems": [
+                {"equipment_name": r.equipment_name, "area_name": r.area_name,
+                 "sweep_uuid": r.sweep_uuid, "severity": r.severity, "status": r.status}
+                for r in reports
+            ],
+        })
+
     # conversational
     reply = routed.get("reply")
     if not reply:
@@ -593,16 +686,55 @@ def segment_view():
     image_b64 = data.get("image") or data.get("image_b64") or ""
     object_name = (data.get("object_name") or "").strip()
     bbox_hint = data.get("bbox")
+    instance_index = data.get("instance_index")
+    if instance_index is not None:
+        try:
+            instance_index = int(instance_index)
+        except (TypeError, ValueError):
+            instance_index = None
     if not image_b64 or not object_name:
         return jsonify({"ok": False, "error": "image and object_name are required"}), 400
     try:
         from app.services import cv_service
-        result = cv_service.segment_object_in_image(image_b64, object_name, bbox_hint)
+        result = cv_service.segment_object_in_image(image_b64, object_name, bbox_hint, instance_index)
     except Exception as e:
         return jsonify({"ok": False, "error": str(e)})
     if not result:
         return jsonify({"ok": False, "error": "no outline found"})
-    return jsonify({"ok": True, **result})
+    # result already carries ok True/False (+ reason/total or polygon).
+    return jsonify(result)
+
+
+@bp.route("/spaces/<int:map_id>/problem-assets", methods=["GET"])
+@api_login_required
+def problem_assets(map_id):
+    """Unresolved maintenance reports for this space — the viewer's Problem
+    Equipment list (click each to fly to it and outline it)."""
+    uid = session["user_id"]
+    space = MatterportSpace.query.filter_by(map_id=map_id, user_id=uid).first()
+    if not space:
+        return jsonify({"ok": False, "error": "Not found"}), 404
+    rank = {"critical": 4, "high": 3, "medium": 2, "low": 1}
+    reports = MaintenanceReport.query.filter(
+        MaintenanceReport.map_id == map_id,
+        MaintenanceReport.status != "resolved",
+    ).all()
+    reports.sort(key=lambda r: (-rank.get(r.severity, 2), -r.id))
+    return jsonify({
+        "ok": True,
+        "problems": [
+            {
+                "id": r.id,
+                "equipment_name": r.equipment_name,
+                "area_name": r.area_name,
+                "sweep_uuid": r.sweep_uuid,
+                "severity": r.severity,
+                "status": r.status,
+                "description": r.description,
+            }
+            for r in reports
+        ],
+    })
 
 
 @bp.route("/maintenance/report", methods=["POST"])

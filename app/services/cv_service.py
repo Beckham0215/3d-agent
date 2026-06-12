@@ -104,12 +104,23 @@ def _load_seg():
             raise RuntimeError(f"YOLOv8-seg failed to load: {e}") from e
 
 
-def segment_object_in_image(image_b64: str, object_name: str, bbox_hint=None) -> dict | None:
-    """Return a tight polygon outline (normalised 0-1) hugging the edges of the
-    best-matching instance of ``object_name`` in the image, using YOLOv8-seg
-    masks. ``bbox_hint`` (normalised x1,y1,x2,y2) disambiguates which instance to
-    pick when several are visible. Returns None if segmentation is unavailable or
-    no matching object is found — callers fall back to the bounding box.
+def segment_object_in_image(image_b64: str, object_name: str, bbox_hint=None, instance_index=None) -> dict | None:
+    """Return a tight polygon outline (normalised 0-1) for ONE specific instance
+    of ``object_name``, using YOLOv8-seg masks.
+
+    All visible instances are enumerated and ordered left-to-right (then
+    top-to-bottom) so numbering is stable. Which one is returned:
+      * ``bbox_hint`` (normalised x1,y1,x2,y2)  → the instance nearest that box
+        (most accurate — used when the scan stored a per-instance box).
+      * else ``instance_index`` (0-based)       → the Nth instance in that order.
+      * else                                    → the highest-confidence instance.
+
+    Returns:
+      {"ok": True, "polygon": [...], "bbox": [...], "score": f,
+       "instance_index": i, "total": n}                    — outline found
+      {"ok": False, "reason": "instance_not_visible", "total": n}
+                         — object(s) seen, but the requested index isn't in view
+      None               — segmentation unavailable, or no matching object at all
     """
     if not image_b64 or not object_name:
         return None
@@ -130,12 +141,7 @@ def segment_object_in_image(image_b64: str, object_name: str, bbox_hint=None) ->
         logger.warning(f"[CV SEG] inference failed: {e}")
         return None
 
-    hint_cx = hint_cy = None
-    if bbox_hint and len(bbox_hint) == 4:
-        hint_cx = (bbox_hint[0] + bbox_hint[2]) / 2.0
-        hint_cy = (bbox_hint[1] + bbox_hint[3]) / 2.0
-
-    best = None  # (key, polygon_norm, bbox_norm, score)
+    candidates = []  # {poly, bbox, score, cx, cy}
     for r in results:
         if r.masks is None:
             continue
@@ -159,26 +165,48 @@ def segment_object_in_image(image_b64: str, object_name: str, bbox_hint=None) ->
             xs = [p[0] for p in npts]
             ys = [p[1] for p in npts]
             bbox_norm = [min(xs), min(ys), max(xs), max(ys)]
-            if hint_cx is not None:
-                cx = (bbox_norm[0] + bbox_norm[2]) / 2.0
-                cy = (bbox_norm[1] + bbox_norm[3]) / 2.0
-                key = -((cx - hint_cx) ** 2 + (cy - hint_cy) ** 2)  # nearer instance wins
-            else:
-                key = score
-            if best is None or key > best[0]:
-                best = (key, npts, bbox_norm, score)
+            candidates.append({
+                "poly": npts,
+                "bbox": bbox_norm,
+                "score": score,
+                "cx": (bbox_norm[0] + bbox_norm[2]) / 2.0,
+                "cy": (bbox_norm[1] + bbox_norm[3]) / 2.0,
+            })
 
-    if best is None:
+    if not candidates:
         return None
 
-    _, npts, bbox_norm, score = best
+    # Stable spatial order: left-to-right, then top-to-bottom.
+    candidates.sort(key=lambda c: (round(c["cx"], 2), round(c["cy"], 2)))
+    total = len(candidates)
+
+    if bbox_hint and len(bbox_hint) == 4:
+        hcx = (bbox_hint[0] + bbox_hint[2]) / 2.0
+        hcy = (bbox_hint[1] + bbox_hint[3]) / 2.0
+        chosen = min(candidates, key=lambda c: (c["cx"] - hcx) ** 2 + (c["cy"] - hcy) ** 2)
+    elif instance_index is not None:
+        if 0 <= instance_index < total:
+            chosen = candidates[instance_index]
+        else:
+            logger.info(f"[CV SEG] {object_name!r} instance #{instance_index} not in view ({total} seen)")
+            return {"ok": False, "reason": "instance_not_visible", "total": total}
+    else:
+        chosen = max(candidates, key=lambda c: c["score"])
+
+    npts = chosen["poly"]
     if len(npts) > 80:  # keep the payload light
         step = (len(npts) + 79) // 80
         npts = npts[::step]
     npts = [[round(x, 4), round(y, 4)] for x, y in npts]
-    bbox_norm = [round(v, 4) for v in bbox_norm]
-    logger.info(f"[CV SEG] outline for {object_name!r}: {len(npts)} pts (score {score:.2f})")
-    return {"polygon": npts, "bbox": bbox_norm, "score": round(score, 3)}
+    logger.info(f"[CV SEG] outline {object_name!r} instance {candidates.index(chosen)}/{total} ({len(npts)} pts)")
+    return {
+        "ok": True,
+        "polygon": npts,
+        "bbox": [round(v, 4) for v in chosen["bbox"]],
+        "score": round(chosen["score"], 3),
+        "instance_index": candidates.index(chosen),
+        "total": total,
+    }
 
 
 def _load_dino():

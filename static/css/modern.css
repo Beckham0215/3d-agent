@@ -2556,6 +2556,29 @@ label {
   box-sizing: border-box;
 }
 
+/* Inline location edit (in the Location panel) */
+.ap-edit-row {
+  display: flex;
+  flex-direction: column;
+  gap: 4px;
+  width: 100%;
+}
+.ap-edit-row input {
+  padding: 0.35rem 0.5rem;
+  font-size: 0.8rem;
+  background: var(--surface-1);
+  border: 1px solid var(--border);
+  border-radius: var(--radius-sm);
+  color: var(--text-primary);
+  width: 100%;
+  box-sizing: border-box;
+}
+.ap-edit-actions {
+  display: flex;
+  gap: 6px;
+}
+.ap-edit-actions .btn { flex: 1; justify-content: center; }
+
 .ap-search-input {
   width: 100%;
   padding: 0.4rem 0.65rem;
@@ -3249,6 +3272,112 @@ label {
   font-size: 0.85rem;
   padding: 0.5rem 0.6rem;
 }
+
+/* Interactive Report-issue popover */
+.report-popover {
+  max-height: calc(100vh - 32px);
+  overflow-y: auto;
+}
+.report-step {
+  display: flex;
+  flex-direction: column;
+  gap: 6px;
+  padding: 8px 0;
+  border-top: 1px solid var(--border-light);
+}
+.report-step:first-of-type {
+  border-top: none;
+  padding-top: 2px;
+}
+.report-step-label {
+  font-size: 0.72rem;
+  font-weight: 700;
+  text-transform: uppercase;
+  letter-spacing: 0.04em;
+  color: var(--text-muted);
+}
+.report-step-label .report-hint {
+  font-weight: 500;
+  text-transform: none;
+  letter-spacing: 0;
+}
+.report-hint {
+  font-size: 0.72rem;
+  color: var(--text-muted);
+}
+.report-asset-list {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 5px;
+  max-height: 150px;
+  overflow-y: auto;
+}
+.report-asset-chip {
+  padding: 0.3rem 0.6rem;
+  border-radius: 999px;
+  border: 1px solid var(--border);
+  background: var(--surface-1);
+  color: var(--text-secondary);
+  font-size: 0.78rem;
+  font-weight: 500;
+  cursor: pointer;
+  font-family: inherit;
+  transition: background 0.15s, border-color 0.15s, color 0.15s;
+}
+.report-asset-chip:hover {
+  border-color: var(--accent-primary);
+  color: var(--accent-primary);
+}
+.report-asset-chip.active {
+  background: var(--accent-soft);
+  border-color: rgba(0, 112, 243, 0.3);
+  color: #0a4fb0;
+}
+.report-asset-general { color: var(--text-muted); }
+
+/* Problem Equipment list (reported faults) */
+#problems-list { flex-direction: column; }
+.report-problem-chip {
+  display: inline-flex;
+  align-items: center;
+  gap: 7px;
+  width: 100%;
+  justify-content: flex-start;
+  text-align: left;
+}
+.problem-chip-name {
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+.problem-sev-dot {
+  display: inline-block;
+  width: 8px;
+  height: 8px;
+  border-radius: 50%;
+  flex-shrink: 0;
+}
+.report-asset-chip--noloc { opacity: 0.55; }
+
+/* Export popover groups */
+.export-group {
+  padding: 8px 0;
+  border-top: 1px solid var(--border-light);
+}
+.export-group:first-of-type { border-top: none; }
+.export-group-title {
+  font-size: 0.72rem;
+  font-weight: 700;
+  text-transform: uppercase;
+  letter-spacing: 0.04em;
+  color: var(--text-muted);
+  margin-bottom: 6px;
+}
+.export-row {
+  display: flex;
+  gap: 6px;
+}
+.export-row .btn { flex: 1; justify-content: center; }
 
 /* ============================================
    TOP-LEFT TOOLS MENU (draggable / minimizable)

@@ -190,13 +190,19 @@
       console.log("[3DAgent] ✓ SDK successfully connected");
       initMinimap().catch(function (e) { console.warn("[3DAgent] Minimap init failed:", e); });
 
-      // Deep-link: a maintenance report can open the viewer at ?goto=<sweep_uuid>
-      // so an admin/mechanic lands on the reported location.
+      // Deep-link: a maintenance report can open the viewer at
+      // ?goto=<sweep_uuid>&hl=<equipment_name> so a manager/mechanic lands on
+      // the reported location AND the faulty asset is outlined automatically.
       try {
-        var _goto = new URLSearchParams(window.location.search).get("goto");
+        var _params = new URLSearchParams(window.location.search);
+        var _goto = _params.get("goto");
+        var _hl = _params.get("hl");
         if (_goto) {
-          appendLine("system", "📍 Navigating to the reported location…");
-          setTimeout(function () { handleNavigate(_goto); }, 3500);
+          appendLine("system", "📍 Navigating to the reported equipment…");
+          setTimeout(function () {
+            handleNavigate(_goto);
+            if (_hl) { setTimeout(function () { _highlightReportedAsset(_goto, _hl); }, 1600); }
+          }, 3500);
         }
       } catch (e) { /* no-op */ }
     } catch (e) {
@@ -333,40 +339,35 @@
     shoDismissBtn.addEventListener("click", clearHighlightOverlay);
   }
 
-  // bbox is [x1,y1,x2,y2] normalized 0–1 zone boundaries from the vision model.
-  // If null/invalid, shows label only so the user knows the camera view is correct.
-  function showHighlightOverlay(objectName, bbox) {
+  // label   : text shown to the user (e.g. "chair #2")
+  // bbox    : [x1,y1,x2,y2] 0–1 hint from the scan, or null
+  // opts    : { segName, instanceIndex } — segName is the bare object name used
+  //           for segmentation; instanceIndex selects WHICH instance to outline.
+  function showHighlightOverlay(label, bbox, opts) {
     if (!scanHighlightOverlay) return;
+    opts = opts || {};
+    const segName = opts.segName || label;
+    const instanceIndex = (opts.instanceIndex != null) ? opts.instanceIndex : null;
 
     const token = ++_highlightToken;
 
-    // Reset any previous edge outline; the box shows first, the precise
-    // outline replaces it once segmentation returns (best-effort).
+    // Reset any previous edge outline; a provisional box shows first, the precise
+    // per-instance outline replaces it once segmentation returns.
     if (shoSvgEl)  shoSvgEl.style.display = "none";
     if (shoPolyEl) shoPolyEl.setAttribute("points", "");
-
-    if (shoLabelEl) {
-      shoLabelEl.textContent = bbox && bbox.length === 4
-        ? `🔆 ${objectName} — highlighted`
-        : `🔆 ${objectName} — camera at best view`;
-    }
+    if (shoLabelEl) shoLabelEl.textContent = `🔆 ${label} — locating…`;
 
     if (shoMarkerEl) {
       if (bbox && bbox.length === 4) {
-        // Position relative to the iframe (the actual 3D viewport)
         const W = iframe.offsetWidth  || 1280;
         const H = iframe.offsetHeight || 720;
-
-        const left   = bbox[0] * W;
-        const top    = bbox[1] * H;
-        const width  = (bbox[2] - bbox[0]) * W;
-        const height = (bbox[3] - bbox[1]) * H;
-
+        const left = bbox[0] * W, top = bbox[1] * H;
+        const width = (bbox[2] - bbox[0]) * W, height = (bbox[3] - bbox[1]) * H;
         if (width > 10 && height > 10) {
-          shoMarkerEl.style.left    = left   + "px";
-          shoMarkerEl.style.top     = top    + "px";
-          shoMarkerEl.style.width   = width  + "px";
-          shoMarkerEl.style.height  = height + "px";
+          shoMarkerEl.style.left = left + "px";
+          shoMarkerEl.style.top = top + "px";
+          shoMarkerEl.style.width = width + "px";
+          shoMarkerEl.style.height = height + "px";
           shoMarkerEl.style.display = "block";
         } else {
           shoMarkerEl.style.display = "none";
@@ -377,14 +378,15 @@
     }
 
     scanHighlightOverlay.style.display = "block";
-
-    // Refine the rectangle into an edge-hugging outline (non-blocking).
-    _refineHighlightWithSeg(objectName, bbox, token);
+    _refineHighlightWithSeg(segName, bbox, token, instanceIndex, label);
   }
 
-  // Capture the current viewport and ask the segmentation model for a polygon
-  // that hugs the object's edges. Falls back silently to the box on any failure.
-  async function _refineHighlightWithSeg(objectName, bboxHint, token) {
+  // Capture the current viewport and ask the segmentation model to outline the
+  // requested instance precisely. The stored bbox disambiguates which instance;
+  // failing that, instanceIndex picks the Nth (left-to-right) so #1 and #2 never
+  // resolve to the same object.
+  async function _refineHighlightWithSeg(segName, bboxHint, token, instanceIndex, displayLabel) {
+    displayLabel = displayLabel || segName;
     try {
       if (!sdk || !sdk.Renderer || !shoSvgEl || !shoPolyEl) return;
       const image = await captureViewportBase64();
@@ -392,24 +394,48 @@
         method: "POST",
         headers: { "Content-Type": "application/json" },
         credentials: "same-origin",
-        body: JSON.stringify({ image, object_name: objectName, bbox: bboxHint || null }),
+        body: JSON.stringify({
+          image,
+          object_name: segName,
+          bbox: bboxHint || null,
+          instance_index: (instanceIndex != null) ? instanceIndex : null,
+        }),
       });
       const data = await res.json().catch(() => ({ ok: false }));
 
       // Bail if the user dismissed or triggered another highlight meanwhile.
       if (token !== _highlightToken) return;
-      if (!data.ok || !Array.isArray(data.polygon) || data.polygon.length < 3) return;
       if (!scanHighlightOverlay || scanHighlightOverlay.style.display === "none") return;
 
-      const pts = data.polygon
-        .map((p) => `${(+p[0]).toFixed(4)},${(+p[1]).toFixed(4)}`)
-        .join(" ");
-      shoPolyEl.setAttribute("points", pts);
-      shoSvgEl.style.display = "block";
-      if (shoMarkerEl) shoMarkerEl.style.display = "none";  // outline is tighter than the box
-      if (shoLabelEl)  shoLabelEl.textContent = `🔆 ${objectName} — outlined`;
+      if (data.ok && Array.isArray(data.polygon) && data.polygon.length >= 3) {
+        const pts = data.polygon.map((p) => `${(+p[0]).toFixed(4)},${(+p[1]).toFixed(4)}`).join(" ");
+        shoPolyEl.setAttribute("points", pts);
+        shoSvgEl.style.display = "block";
+        if (shoMarkerEl) shoMarkerEl.style.display = "none";  // outline is tighter than the box
+        const totalTxt = (data.total > 1) ? ` (of ${data.total})` : "";
+        if (shoLabelEl) shoLabelEl.textContent = `🔆 ${displayLabel} — outlined${totalTxt}`;
+        return;
+      }
+
+      // The object is visible but the requested instance isn't in this view —
+      // be honest rather than outline the wrong one.
+      if (data.reason === "instance_not_visible") {
+        if (shoMarkerEl) shoMarkerEl.style.display = "none";
+        if (shoSvgEl) shoSvgEl.style.display = "none";
+        if (shoLabelEl) shoLabelEl.textContent = `🔆 ${displayLabel} — not visible from this view`;
+        return;
+      }
+
+      // Segmentation found nothing: keep the stored box if we have one.
+      if (shoMarkerEl && shoMarkerEl.style.display !== "none") {
+        if (shoLabelEl) shoLabelEl.textContent = `🔆 ${displayLabel} — highlighted`;
+      } else if (shoLabelEl) {
+        shoLabelEl.textContent = `🔆 ${displayLabel} — couldn't outline (try moving closer)`;
+      }
     } catch (e) {
-      /* keep the bounding-box highlight */
+      if (shoMarkerEl && shoMarkerEl.style.display !== "none" && shoLabelEl) {
+        shoLabelEl.textContent = `🔆 ${displayLabel} — highlighted`;
+      }
     }
   }
 
@@ -545,7 +571,41 @@
 
     const yaw = (pendingScanBaseRotation.y || 0) + (cache.angle || 0);
     try { await rotateToYawAtCurrentSweep(yaw, pendingScanBaseRotation.x || 0); } catch (_) {}
-    showHighlightOverlay(label, bbox);
+    showHighlightOverlay(label, bbox, { segName: assetName, instanceIndex: hasIdx ? instanceIndex : null });
+  }
+
+  // Outline a faulty asset referenced by a maintenance report's equipment name
+  // (e.g. "Chair #2"). Looks up the scanned asset row for its exact angle + box,
+  // then highlights that specific instance. Used by the ?goto&hl deep-link from
+  // the maintenance "Inspect Problem Equipment" list.
+  async function _highlightReportedAsset(sweepUuid, equipmentName) {
+    try {
+      const m = String(equipmentName || "").match(/^(.*?)\s*#(\d+)\s*$/);
+      const base = (m ? m[1] : (equipmentName || "")).trim();
+      const serial = m ? parseInt(m[2], 10) : null;
+      if (!base) return;
+
+      let match = null;
+      try {
+        const res = await fetch(`/api/spaces/${mapId}/assets-panel`, { credentials: "same-origin" });
+        const data = await res.json().catch(() => ({}));
+        const summaries = (data && data.scan_summaries) || [];
+        const sameName = s => (s.asset_name || "").toLowerCase() === base.toLowerCase();
+        const sameSerial = s => (serial == null) || (s.serial_number === serial);
+        match = summaries.find(s => sameName(s) && sameSerial(s) && (!sweepUuid || s.sweep_uuid === sweepUuid))
+             || summaries.find(s => sameName(s) && sameSerial(s));
+      } catch (_) {}
+
+      const label = serial ? `${base.charAt(0).toUpperCase() + base.slice(1)} #${serial}` : base;
+      if (scanHighlightOverlay) scanHighlightOverlay.style.display = "block";
+      if (match) {
+        if (match.best_angle != null) { try { await rotateToYawAtCurrentSweep(match.best_angle, 0); } catch (_) {} }
+        showHighlightOverlay(label, match.bbox, { segName: base, instanceIndex: (serial || 1) - 1 });
+      } else {
+        showHighlightOverlay(label, null, { segName: base, instanceIndex: serial != null ? serial - 1 : null });
+      }
+      appendLine("system", "🔧 Outlining reported equipment: " + label + ".");
+    } catch (e) { /* no-op */ }
   }
 
   function renderScanReview(counts) {
@@ -1715,28 +1775,199 @@
     });
   }
 
-  // --- MAINTENANCE REPORT FORM HANDLER ---
-  const reportForm = document.getElementById("report-issue-form");
-  const reportStatusEl = document.getElementById("report-status");
+  // --- MAINTENANCE REPORT: interactive location → asset → describe flow ---
+  const reportForm           = document.getElementById("report-issue-form");
+  const reportStatusEl       = document.getElementById("report-status");
+  const reportLocationSelect = document.getElementById("report-location-select");
+  const reportAssetStep      = document.getElementById("report-asset-step");
+  const reportAssetList      = document.getElementById("report-asset-list");
+  const reportNoAssets       = document.getElementById("report-no-assets");
+  const reportEquipmentInput = document.getElementById("report-equipment");
+  const reportIssueBtnEl     = document.getElementById("report-issue-btn");
+
+  let reportSummaries = [];
+  let reportSelectedAsset = null;   // {general?, area, name, sweep, angle, bbox, serial, baseName}
+
+  function _reportAssetLabel(s) {
+    const name = (s.asset_name || "item");
+    const cap = name.charAt(0).toUpperCase() + name.slice(1);
+    return s.serial_number ? `${cap} #${s.serial_number}` : cap;
+  }
+
+  function resetReportFlow() {
+    reportSelectedAsset = null;
+    if (reportAssetStep) reportAssetStep.style.display = "none";
+    if (reportForm) reportForm.style.display = "none";
+    if (reportAssetList) reportAssetList.innerHTML = "";
+    if (reportEquipmentInput) reportEquipmentInput.value = "";
+    const d = document.getElementById("report-description"); if (d) d.value = "";
+    const sv = document.getElementById("report-severity"); if (sv) sv.value = "medium";
+    if (reportStatusEl) reportStatusEl.textContent = "";
+  }
+
+  // Load the scanned assets so the popover can list locations & their assets.
+  async function loadReportData() {
+    resetReportFlow();
+    if (reportLocationSelect) reportLocationSelect.value = "";
+    try {
+      const res = await fetch(`/api/spaces/${mapId}/assets-panel`, { credentials: "same-origin" });
+      const data = await res.json().catch(() => ({ ok: false }));
+      reportSummaries = (data.ok && Array.isArray(data.scan_summaries)) ? data.scan_summaries : [];
+    } catch (_) { reportSummaries = []; }
+
+    const areas = Array.from(new Set(reportSummaries.map(s => s.area_name || "Unspecified"))).sort();
+    if (reportLocationSelect) {
+      reportLocationSelect.innerHTML = '<option value="">Choose a location…</option>';
+      areas.forEach(a => {
+        const o = document.createElement("option"); o.value = a; o.textContent = a;
+        reportLocationSelect.appendChild(o);
+      });
+      const og = document.createElement("option"); og.value = "__general__"; og.textContent = "Other / general issue";
+      reportLocationSelect.appendChild(og);
+    }
+    if (reportNoAssets) reportNoAssets.style.display = areas.length ? "none" : "block";
+  }
+
+  function buildReportAssetList(area, assets) {
+    if (!reportAssetList) return;
+    let html = assets.map(s => `<button type="button" class="report-asset-chip" data-id="${s.id}">${_reportAssetLabel(s)}</button>`).join("");
+    html += `<button type="button" class="report-asset-chip report-asset-general" data-general="1">Other / general</button>`;
+    reportAssetList.innerHTML = html;
+    reportAssetList.querySelectorAll(".report-asset-chip").forEach(btn => {
+      btn.addEventListener("click", () => {
+        reportAssetList.querySelectorAll(".report-asset-chip").forEach(b => b.classList.remove("active"));
+        btn.classList.add("active");
+        if (btn.dataset.general) {
+          reportSelectedAsset = { general: true, area: area };
+          if (reportEquipmentInput) reportEquipmentInput.value = "";
+          if (reportForm) reportForm.style.display = "block";
+          if (reportEquipmentInput) setTimeout(() => reportEquipmentInput.focus(), 0);
+          clearHighlightOverlay();
+          return;
+        }
+        const s = assets.find(a => String(a.id) === btn.dataset.id);
+        if (s) selectReportAsset(s, area);
+      });
+    });
+  }
+
+  // Fly to the chosen asset and outline that exact instance.
+  async function selectReportAsset(s, area) {
+    reportSelectedAsset = {
+      general: false, area: area, name: _reportAssetLabel(s),
+      sweep: s.sweep_uuid, angle: s.best_angle, bbox: s.bbox,
+      serial: s.serial_number, baseName: s.asset_name,
+    };
+    if (reportEquipmentInput) reportEquipmentInput.value = _reportAssetLabel(s);
+    if (reportForm) reportForm.style.display = "block";
+    if (!s.sweep_uuid) return;
+    await handleNavigate(s.sweep_uuid);
+    await sleep(1200);
+    if (s.best_angle != null) { try { await rotateToYawAtCurrentSweep(s.best_angle, 0); } catch (_) {} }
+    if (scanHighlightOverlay) scanHighlightOverlay.style.display = "block";
+    showHighlightOverlay(_reportAssetLabel(s), s.bbox, { segName: s.asset_name, instanceIndex: (s.serial_number || 1) - 1 });
+  }
+
+  async function onReportLocationChange() {
+    if (!reportLocationSelect) return;
+    const area = reportLocationSelect.value;
+    reportSelectedAsset = null;
+    if (reportForm) reportForm.style.display = "none";
+    clearHighlightOverlay();
+    if (!area) { if (reportAssetStep) reportAssetStep.style.display = "none"; return; }
+
+    if (area === "__general__") {
+      if (reportAssetStep) reportAssetStep.style.display = "none";
+      reportSelectedAsset = { general: true, area: "" };
+      if (reportForm) reportForm.style.display = "block";
+      if (reportEquipmentInput) setTimeout(() => reportEquipmentInput.focus(), 0);
+      return;
+    }
+
+    const assets = reportSummaries.filter(s => (s.area_name || "Unspecified") === area && s.sweep_uuid);
+    // Bring the user to the location so they can see the assets.
+    const first = assets[0];
+    if (first && first.sweep_uuid) {
+      appendLine("system", `📍 Going to ${area} — click the asset that has the issue.`);
+      handleNavigate(first.sweep_uuid);
+    }
+    buildReportAssetList(area, assets);
+    if (reportAssetStep) reportAssetStep.style.display = "block";
+  }
+
+  if (reportLocationSelect) reportLocationSelect.addEventListener("change", onReportLocationChange);
+  if (reportIssueBtnEl) reportIssueBtnEl.addEventListener("click", function () { loadReportData(); });
+
+  // ── Problem Equipment popover — reported faults; click to fly to + outline ──
+  const problemsBtnEl  = document.getElementById("problems-btn");
+  const problemsListEl = document.getElementById("problems-list");
+
+  function _sevDot(sev) {
+    const color = ({ critical: "#b91c1c", high: "#ea580c", medium: "#d97706", low: "#94a3b8" })[sev] || "#94a3b8";
+    return `<span class="problem-sev-dot" style="background:${color};"></span>`;
+  }
+
+  async function loadProblemAssets() {
+    if (!problemsListEl) return;
+    problemsListEl.innerHTML = '<div class="ap-empty">Loading…</div>';
+    let problems = [];
+    try {
+      const res = await fetch(`/api/spaces/${mapId}/problem-assets`, { credentials: "same-origin" });
+      const data = await res.json().catch(() => ({ ok: false }));
+      problems = (data.ok && data.problems) || [];
+    } catch (_) {}
+
+    if (!problems.length) {
+      problemsListEl.innerHTML = '<div class="ap-empty">No reported problems in this space. 🎉</div>';
+      return;
+    }
+    problemsListEl.innerHTML = problems.map(p => {
+      const loc = p.area_name ? ` · ${p.area_name}` : "";
+      const noloc = p.sweep_uuid ? "" : " report-asset-chip--noloc";
+      const name = (p.equipment_name || "").replace(/"/g, "&quot;");
+      return `<button type="button" class="report-asset-chip report-problem-chip${noloc}"
+                data-sweep="${p.sweep_uuid || ""}" data-name="${name}">
+                ${_sevDot(p.severity)}<span class="problem-chip-name">${p.equipment_name}${loc}</span>
+              </button>`;
+    }).join("");
+
+    problemsListEl.querySelectorAll(".report-problem-chip").forEach(btn => {
+      btn.addEventListener("click", async () => {
+        const sweep = btn.dataset.sweep;
+        const name = btn.dataset.name;
+        if (!sweep) { appendLine("system", `"${name}" has no recorded 3D location.`); return; }
+        problemsListEl.querySelectorAll(".report-problem-chip").forEach(b => b.classList.remove("active"));
+        btn.classList.add("active");
+        appendLine("system", `🔧 Going to ${name}…`);
+        await handleNavigate(sweep);
+        await sleep(1400);
+        await _highlightReportedAsset(sweep, name);
+      });
+    });
+  }
+
+  if (problemsBtnEl) problemsBtnEl.addEventListener("click", function () { loadProblemAssets(); });
 
   if (reportForm) {
     reportForm.addEventListener("submit", async function (ev) {
       ev.preventDefault();
 
-      const equipment = (document.getElementById("report-equipment").value || "").trim();
+      const equipment = (reportEquipmentInput ? reportEquipmentInput.value : "").trim();
       const description = (document.getElementById("report-description").value || "").trim();
       const severity = document.getElementById("report-severity").value || "medium";
 
       if (!equipment) {
-        reportStatusEl.textContent = "❌ Enter the equipment name";
+        reportStatusEl.textContent = "❌ Enter the asset / equipment name";
         reportStatusEl.style.color = "var(--danger)";
         return;
       }
 
-      // If the current sweep is a known tagged location, send its label as the area.
-      let areaName = "";
-      const tag = currentSweepUuid ? taggedSweepMap[currentSweepUuid] : null;
-      if (tag) areaName = tag.label_name + (tag.category ? " (" + tag.category + ")" : "");
+      let areaName = (reportSelectedAsset && reportSelectedAsset.area) || "";
+      let sweepUuid = (reportSelectedAsset && reportSelectedAsset.sweep) || currentSweepUuid || undefined;
+      if (!areaName) {
+        const tag = currentSweepUuid ? taggedSweepMap[currentSweepUuid] : null;
+        if (tag) areaName = tag.label_name + (tag.category ? " (" + tag.category + ")" : "");
+      }
 
       reportStatusEl.textContent = "⏳ Submitting…";
       reportStatusEl.style.color = "var(--text-muted)";
@@ -1751,7 +1982,7 @@
             equipment_name: equipment,
             description: description || undefined,
             severity: severity,
-            sweep_uuid: currentSweepUuid || undefined,
+            sweep_uuid: sweepUuid,
             area_name: areaName || undefined,
           }),
         });
@@ -1760,10 +1991,10 @@
 
         reportStatusEl.textContent = "✓ Issue reported — admin notified.";
         reportStatusEl.style.color = "var(--success)";
-        document.getElementById("report-equipment").value = "";
-        document.getElementById("report-description").value = "";
-        document.getElementById("report-severity").value = "medium";
-        appendLine("system", "🛠️ Maintenance issue reported: " + equipment + " — severity: " + severity + ".");
+        appendLine("system", "🛠️ Maintenance issue reported: " + equipment + (areaName ? " @ " + areaName : "") + " — severity: " + severity + ".");
+        resetReportFlow();
+        if (reportLocationSelect) reportLocationSelect.value = "";
+        clearHighlightOverlay();
         setTimeout(() => { reportStatusEl.textContent = ""; }, 4000);
       } catch (err) {
         console.error("[3DAgent] Report issue error:", err);
@@ -2286,11 +2517,12 @@
           const angle     = parseFloat(btn.dataset.angle);
           const bbox      = JSON.parse(btn.dataset.bbox);
           const assetName = btn.dataset.name;
+          const serial    = parseInt(btn.dataset.serial) || 1;
           await handleNavigate(sweepUuid);
           await sleep(1200);
           try { await rotateToYawAtCurrentSweep(angle, 0); } catch (_) {}
           if (scanHighlightOverlay) scanHighlightOverlay.style.display = "block";
-          showHighlightOverlay(assetName, bbox);
+          showHighlightOverlay(`${assetName} #${serial}`, bbox, { segName: assetName, instanceIndex: serial - 1 });
         });
       });
 
@@ -2332,6 +2564,7 @@
 
   async function openAssetsPanel() {
     if (!assetsPanelEl) return;
+    if (typeof closeLocationPanel === "function") closeLocationPanel();
     assetsPanelEl.style.display = "flex";
     await refreshAssetsPanel();
   }
@@ -2354,17 +2587,7 @@
   }
 
   function renderAssetsPanel(data) {
-    const assets    = data.assets || [];
     const summaries = data.scan_summaries || [];
-
-    // Group assets by category
-    const grouped = {};
-    assets.forEach(a => {
-      const cat = a.category || "Uncategorized";
-      if (!grouped[cat]) grouped[cat] = [];
-      grouped[cat].push(a);
-    });
-    const categories = Object.keys(grouped).sort();
 
     // Group summaries by area
     const areaMap = {};
@@ -2375,48 +2598,9 @@
     });
     const areas = Object.keys(areaMap).sort();
 
-    // ── Section 1: Navigation Locations (collapsed by default, searchable) ──
-    let locHtml = `
-      <div class="ap-section-title">📌 Navigation Locations
-        <span class="ap-count">${assets.length}</span>
-      </div>
-      <form id="ap-add-location-form" class="ap-add-form">
-        <input type="text" id="ap-label" placeholder="Location name (e.g. Kitchen 1)" required autocomplete="off">
-        <input type="text" id="ap-category" placeholder="Category (e.g. Kitchen)" autocomplete="off">
-        <input type="text" id="ap-uuid" placeholder="${currentSweepUuid || 'Sweep UUID (leave blank for current)'}" autocomplete="off">
-        <button type="submit" class="btn primary small" style="width:100%;">✓ Add Location</button>
-      </form>`;
-
-    if (assets.length) {
-      locHtml += `<input type="text" id="ap-loc-search" class="ap-search-input" placeholder="Search locations or categories…" autocomplete="off">`;
-      locHtml += `<div id="ap-loc-list">` + categories.map(cat => `
-        <div class="ap-group" data-cat="${cat.toLowerCase()}">
-          <div class="ap-group-header ap-collapsible">
-            <span class="ap-collapse-icon">▶</span>
-            <span>${cat}</span>
-            <span class="ap-count">${grouped[cat].length}</span>
-          </div>
-          <div class="ap-group-rows" style="display:none;">
-            ${grouped[cat].map(a => `
-              <div class="ap-row" data-label="${a.label_name.toLowerCase()}">
-                <div class="ap-row-info">
-                  <span class="ap-row-label">${a.label_name}</span>
-                  ${a.sweep_uuid ? `<span class="ap-row-uuid">${a.sweep_uuid.slice(0, 12)}…</span>` : ""}
-                </div>
-                <div class="ap-row-actions">
-                  ${a.sweep_uuid ? `<button type="button" class="btn small secondary ap-navigate-btn" data-uuid="${a.sweep_uuid}" data-label="${a.label_name}" title="Go here">▶</button>` : ""}
-                  <button type="button" class="btn small danger ap-delete-asset-btn" data-id="${a.asset_id}" title="Delete">🗑</button>
-                </div>
-              </div>`).join("")}
-          </div>
-        </div>`).join("") + `</div>`;
-    } else {
-      locHtml += `<div class="ap-empty">No locations tagged yet. Use Auto-Tag or the Quick Tag panel.</div>`;
-    }
-
-    // ── Section 2: Scanned Inventory (area chips, drill-down) ──
+    // Scanned inventory only — navigation locations live in the Location panel.
     let invHtml = `
-      <div class="ap-section-title" style="margin-top:1rem;">🔍 Scanned Inventory
+      <div class="ap-section-title">🔍 Scanned Inventory
         <span class="ap-count">${summaries.length}</span>
       </div>`;
 
@@ -2436,66 +2620,7 @@
       invHtml += `<div class="ap-empty">No scanned inventory yet. Use Scan Area in the viewer.</div>`;
     }
 
-    assetsPanelBody.innerHTML = locHtml + invHtml;
-
-    // ── Wire: collapsible location groups ──
-    assetsPanelBody.querySelectorAll(".ap-collapsible").forEach(header => {
-      header.addEventListener("click", () => {
-        const rows = header.nextElementSibling;
-        const icon = header.querySelector(".ap-collapse-icon");
-        const open = rows.style.display !== "none";
-        rows.style.display = open ? "none" : "";
-        icon.textContent = open ? "▶" : "▼";
-      });
-    });
-
-    // ── Wire: location search ──
-    const searchInput = assetsPanelBody.querySelector("#ap-loc-search");
-    if (searchInput) {
-      searchInput.addEventListener("input", () => {
-        const term = searchInput.value.trim().toLowerCase();
-        assetsPanelBody.querySelectorAll(".ap-group").forEach(group => {
-          const rows = group.querySelectorAll(".ap-row");
-          const rowsContainer = group.querySelector(".ap-group-rows");
-          const icon = group.querySelector(".ap-collapse-icon");
-          if (!term) {
-            rowsContainer.style.display = "none";
-            if (icon) icon.textContent = "▶";
-            group.style.display = "";
-            rows.forEach(r => r.style.display = "");
-            return;
-          }
-          const catMatch = group.dataset.cat.includes(term);
-          let anyVisible = false;
-          rows.forEach(row => {
-            const match = catMatch || (row.dataset.label || "").includes(term);
-            row.style.display = match ? "" : "none";
-            if (match) anyVisible = true;
-          });
-          group.style.display = anyVisible ? "" : "none";
-          if (anyVisible) { rowsContainer.style.display = ""; if (icon) icon.textContent = "▼"; }
-        });
-      });
-    }
-
-    // ── Wire: navigate buttons ──
-    assetsPanelBody.querySelectorAll(".ap-navigate-btn").forEach(btn => {
-      btn.addEventListener("click", () => { closeAssetsPanel(); navigateWithRoute(btn.dataset.uuid, btn.dataset.label || ""); });
-    });
-
-    // ── Wire: location delete ──
-    assetsPanelBody.querySelectorAll(".ap-delete-asset-btn").forEach(btn => {
-      btn.addEventListener("click", async () => {
-        if (!confirm("Delete this location tag?")) return;
-        btn.disabled = true;
-        try {
-          const res = await fetch(`/api/spaces/${mapId}/assets/${btn.dataset.id}`, { method: "DELETE", credentials: "same-origin" });
-          const d = await res.json().catch(() => ({}));
-          if (d.ok) await refreshAssetsPanel();
-          else appendLine("system", "Delete failed: " + (d.error || "unknown"));
-        } catch (e) { appendLine("system", "Delete error: " + e.message); }
-      });
-    });
+    assetsPanelBody.innerHTML = invHtml;
 
     // ── Wire: area chips + detail drill-down ──
     const areaChipsEl  = assetsPanelBody.querySelector("#ap-area-chips");
@@ -2582,6 +2707,7 @@
           const angle      = parseFloat(btn.dataset.angle);
           const bbox       = JSON.parse(btn.dataset.bbox);
           const assetName  = btn.dataset.name;
+          const serial     = parseInt(btn.dataset.serial) || 1;
 
           // Keep the Assets panel open so multiple items can be highlighted
           // without re-opening Assets → location → item each time.
@@ -2589,7 +2715,7 @@
           await sleep(1200);
           try { await rotateToYawAtCurrentSweep(angle, 0); } catch (_) {}
           if (scanHighlightOverlay) scanHighlightOverlay.style.display = "block";
-          showHighlightOverlay(assetName, bbox);
+          showHighlightOverlay(`${assetName} #${serial}`, bbox, { segName: assetName, instanceIndex: serial - 1 });
         });
       });
 
@@ -2662,33 +2788,6 @@
         if (areaChipsEl) areaChipsEl.style.display = "";
       });
     }
-
-    // ── Wire: add-location form ──
-    const addForm = assetsPanelBody.querySelector("#ap-add-location-form");
-    if (addForm) {
-      addForm.addEventListener("submit", async (ev) => {
-        ev.preventDefault();
-        const label    = (addForm.querySelector("#ap-label").value || "").trim();
-        const category = (addForm.querySelector("#ap-category").value || "").trim();
-        const uuid     = (addForm.querySelector("#ap-uuid").value || "").trim() || currentSweepUuid;
-        if (!label) return;
-        if (!uuid) { appendLine("system", "No sweep UUID — navigate to a location first."); return; }
-        const submitBtn = addForm.querySelector("button[type=submit]");
-        submitBtn.disabled = true;
-        try {
-          const res = await fetch("/api/mark-asset", {
-            method: "POST",
-            headers: { "Content-Type": "application/json" },
-            credentials: "same-origin",
-            body: JSON.stringify({ map_id: mapId, asset_name: label, sweep_uuid: uuid, category: category || undefined }),
-          });
-          const d = await res.json().catch(() => ({}));
-          if (d.ok) { addForm.reset(); await refreshAssetsPanel(); }
-          else appendLine("system", "Save failed: " + (d.error || "unknown"));
-        } catch (e) { appendLine("system", "Save error: " + e.message); }
-        submitBtn.disabled = false;
-      });
-    }
   }
 
   if (assetsPanelOpen)  assetsPanelOpen.addEventListener("click", openAssetsPanel);
@@ -2697,7 +2796,170 @@
   const routeHudCancel = document.getElementById("route-hud-cancel");
   if (routeHudCancel) routeHudCancel.addEventListener("click", clearRoute);
 
-  // ── Shared helper: refresh scan-location dropdown + open assets panel ────────
+  // ── In-viewer Location Panel — tag + CRUD + navigate ──────────────────────
+
+  const locationPanelEl    = document.getElementById("location-panel");
+  const locationListBody   = document.getElementById("location-list-body");
+  const locationBtn        = document.getElementById("location-btn");
+  const locationPanelClose = document.getElementById("location-panel-close");
+
+  function _escAttr(s) { return String(s == null ? "" : s).replace(/"/g, "&quot;"); }
+
+  async function openLocationPanel() {
+    if (!locationPanelEl) return;
+    closeAssetsPanel();                 // keep Locations and Assets separate
+    locationPanelEl.style.display = "flex";
+    const nameInput = document.getElementById("quick-asset-name");
+    if (nameInput) setTimeout(() => nameInput.focus(), 0);
+    await refreshLocationPanel();
+  }
+  function closeLocationPanel() {
+    if (locationPanelEl) locationPanelEl.style.display = "none";
+  }
+
+  async function refreshLocationPanel() {
+    if (!locationListBody) return;
+    locationListBody.innerHTML = '<div class="ap-empty">Loading…</div>';
+    try {
+      const res = await fetch(`/api/spaces/${mapId}/assets`, { credentials: "same-origin" });
+      const data = await res.json().catch(() => ({ assets: [] }));
+      renderLocationList(data.assets || []);
+    } catch (err) {
+      locationListBody.innerHTML = `<div class="ap-empty" style="color:var(--danger);">Error: ${err.message}</div>`;
+    }
+  }
+
+  function renderLocationList(assets) {
+    if (!locationListBody) return;
+    if (!assets.length) {
+      locationListBody.innerHTML = `<div class="ap-empty">No locations yet. Tag the current spot above, or use Auto-Tag.</div>`;
+      return;
+    }
+    const grouped = {};
+    assets.forEach(a => { const c = a.category || "Uncategorized"; (grouped[c] = grouped[c] || []).push(a); });
+    const cats = Object.keys(grouped).sort();
+
+    let html = `<input type="text" id="loc-search" class="ap-search-input" placeholder="Search locations or categories…" autocomplete="off">`;
+    html += `<div class="ap-section-title">📌 Tagged Locations <span class="ap-count">${assets.length}</span></div>`;
+    html += cats.map(cat => `
+      <div class="ap-group" data-cat="${_escAttr(cat.toLowerCase())}">
+        <div class="ap-group-header ap-collapsible">
+          <span class="ap-collapse-icon">▶</span>
+          <span>${cat}</span>
+          <span class="ap-count">${grouped[cat].length}</span>
+        </div>
+        <div class="ap-group-rows" style="display:none;">
+          ${grouped[cat].map(a => `
+            <div class="ap-row" data-label="${_escAttr(a.label_name.toLowerCase())}">
+              <div class="ap-row-info">
+                <span class="ap-row-label">${a.label_name}</span>
+                ${a.sweep_uuid ? `<span class="ap-row-uuid">${a.sweep_uuid.slice(0, 12)}…</span>` : ""}
+              </div>
+              <div class="ap-row-actions">
+                ${a.sweep_uuid ? `<button type="button" class="btn small secondary loc-nav-btn" data-uuid="${_escAttr(a.sweep_uuid)}" data-label="${_escAttr(a.label_name)}" title="Navigate here">▶</button>` : ""}
+                <button type="button" class="btn small secondary loc-edit-btn" data-id="${a.asset_id}" data-label="${_escAttr(a.label_name)}" data-category="${_escAttr(a.category || "")}" title="Edit">✏️</button>
+                <button type="button" class="btn small danger loc-delete-btn" data-id="${a.asset_id}" title="Delete">🗑</button>
+              </div>
+            </div>`).join("")}
+        </div>
+      </div>`).join("");
+
+    locationListBody.innerHTML = html;
+    _wireLocationList();
+  }
+
+  function _wireLocationList() {
+    locationListBody.querySelectorAll(".ap-collapsible").forEach(header => {
+      header.addEventListener("click", () => {
+        const rows = header.nextElementSibling;
+        const icon = header.querySelector(".ap-collapse-icon");
+        const open = rows.style.display !== "none";
+        rows.style.display = open ? "none" : "";
+        if (icon) icon.textContent = open ? "▶" : "▼";
+      });
+    });
+
+    const search = locationListBody.querySelector("#loc-search");
+    if (search) {
+      search.addEventListener("input", () => {
+        const term = search.value.trim().toLowerCase();
+        locationListBody.querySelectorAll(".ap-group").forEach(group => {
+          const rows = group.querySelectorAll(".ap-row");
+          const rowsC = group.querySelector(".ap-group-rows");
+          const icon = group.querySelector(".ap-collapse-icon");
+          if (!term) { rowsC.style.display = "none"; if (icon) icon.textContent = "▶"; group.style.display = ""; rows.forEach(r => r.style.display = ""); return; }
+          const catMatch = group.dataset.cat.includes(term);
+          let any = false;
+          rows.forEach(r => { const m = catMatch || (r.dataset.label || "").includes(term); r.style.display = m ? "" : "none"; if (m) any = true; });
+          group.style.display = any ? "" : "none";
+          if (any) { rowsC.style.display = ""; if (icon) icon.textContent = "▼"; }
+        });
+      });
+    }
+
+    locationListBody.querySelectorAll(".loc-nav-btn").forEach(btn => {
+      btn.addEventListener("click", () => navigateWithRoute(btn.dataset.uuid, btn.dataset.label || ""));
+    });
+
+    locationListBody.querySelectorAll(".loc-delete-btn").forEach(btn => {
+      btn.addEventListener("click", async () => {
+        if (!confirm("Delete this location?")) return;
+        btn.disabled = true;
+        try {
+          const res = await fetch(`/api/spaces/${mapId}/assets/${btn.dataset.id}`, { method: "DELETE", credentials: "same-origin" });
+          const d = await res.json().catch(() => ({}));
+          if (d.ok) await _refreshLocationData();
+          else appendLine("system", "Delete failed: " + (d.error || "unknown"));
+        } catch (e) { appendLine("system", "Delete error: " + e.message); }
+      });
+    });
+
+    locationListBody.querySelectorAll(".loc-edit-btn").forEach(btn => {
+      btn.addEventListener("click", () => _beginLocationEdit(btn));
+    });
+  }
+
+  function _beginLocationEdit(btn) {
+    const row = btn.closest(".ap-row");
+    if (!row) return;
+    const id = btn.dataset.id;
+    row.innerHTML = `
+      <div class="ap-edit-row">
+        <input type="text" class="loc-edit-name" value="${_escAttr(btn.dataset.label || "")}" placeholder="Name">
+        <input type="text" class="loc-edit-cat" value="${_escAttr(btn.dataset.category || "")}" placeholder="Category">
+        <div class="ap-edit-actions">
+          <button type="button" class="btn small success loc-edit-save">✓ Save</button>
+          <button type="button" class="btn small ghost loc-edit-cancel">Cancel</button>
+        </div>
+      </div>`;
+    const nameI = row.querySelector(".loc-edit-name");
+    if (nameI) nameI.focus();
+    row.querySelector(".loc-edit-cancel").addEventListener("click", () => refreshLocationPanel());
+    row.querySelector(".loc-edit-save").addEventListener("click", async () => {
+      const newName = (row.querySelector(".loc-edit-name").value || "").trim();
+      const newCat  = (row.querySelector(".loc-edit-cat").value || "").trim();
+      if (!newName) { appendLine("system", "Location name can't be empty."); return; }
+      try {
+        const res = await fetch(`/api/spaces/${mapId}/assets/${id}`, {
+          method: "PUT",
+          headers: { "Content-Type": "application/json" },
+          credentials: "same-origin",
+          body: JSON.stringify({ label_name: newName, category: newCat }),
+        });
+        const d = await res.json().catch(() => ({}));
+        if (d.ok) await _refreshLocationData();
+        else appendLine("system", "Update failed: " + (d.error || "unknown"));
+      } catch (e) { appendLine("system", "Update error: " + e.message); }
+    });
+  }
+
+  if (locationBtn) locationBtn.addEventListener("click", function () {
+    if (locationPanelEl && locationPanelEl.style.display !== "none") closeLocationPanel();
+    else openLocationPanel();
+  });
+  if (locationPanelClose) locationPanelClose.addEventListener("click", closeLocationPanel);
+
+  // ── Shared helper: refresh scan-location dropdown + panels ──────────────────
 
   async function _refreshLocationData() {
     await loadScanLocations();
@@ -2708,6 +2970,9 @@
     } catch (_) {}
     if (assetsPanelEl && assetsPanelEl.style.display !== "none") {
       await refreshAssetsPanel();
+    }
+    if (locationPanelEl && locationPanelEl.style.display !== "none") {
+      await refreshLocationPanel();
     }
   }
 
@@ -3159,10 +3424,14 @@
     minimapExportBtn.addEventListener("click", function () { openExportModal(); });
   }
 
-  // Open export modal from the tools rail
-  var exportPlanBtn = document.getElementById("export-plan-btn");
-  if (exportPlanBtn) {
-    exportPlanBtn.addEventListener("click", function () { openExportModal(); });
+  // Open the annotated floor-plan modal from the Export popover
+  var exportFloorplanBtn = document.getElementById("export-floorplan-btn");
+  if (exportFloorplanBtn) {
+    exportFloorplanBtn.addEventListener("click", function () {
+      var pop = document.getElementById("export-popover");
+      if (pop) pop.style.display = "none";
+      openExportModal();
+    });
   }
 
   // Close export modal
@@ -3469,10 +3738,17 @@
           }
           if (nearest.bbox_json) {
             if (scanHighlightOverlay) scanHighlightOverlay.style.display = "block";
-            showHighlightOverlay(data.asset_name, nearest.bbox_json);
+            showHighlightOverlay(data.asset_name, nearest.bbox_json, { segName: data.asset_name });
           }
         } else {
           appendLine("agent", `Found ${data.instances.length} ${data.asset_name}(s) but no location data is saved. Use the Assets panel to navigate manually.`);
+        }
+      } else if (data.intent === "report_issue") {
+        appendLine("agent", data.response || "Maintenance report logged.");
+        if (data.navigate && data.navigate.sweep_uuid) {
+          await handleNavigate(data.navigate.sweep_uuid);
+          await sleep(1400);
+          await _highlightReportedAsset(data.navigate.sweep_uuid, data.navigate.equipment_name);
         }
       } else if (data.response) {
         appendLine("agent", data.response);

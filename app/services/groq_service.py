@@ -45,14 +45,18 @@ def route_intent(user_message: str, asset_labels: list[str], last_queried_area: 
         "- where_am_i: user asks about their current location, which room or area they are in right now (e.g. 'where am I', 'what room is this', 'which location am I in', 'what place is this', 'tell me my current location').\n"
         "- react_query: user has a complex multi-step planning request requiring room suitability verification (e.g. 'I need a meeting room for 10 people', 'find a room that fits 15 people', 'which room has enough chairs for a seminar', 'I need to host a dinner for 8 people', 'set up a conference for 20 attendees').\n"
         "- query_assets: user asks about what assets/items are in a specific room or area (e.g. 'what are the assets in bedroom 1', 'how many closets are in bedroom 1', 'what furniture is in the kitchen', 'list items in living room').\n"
+        "- report_issue: user wants to report a fault, damage, or maintenance problem with a specific asset/equipment (e.g. 'report chair #1 has a broken leg', 'the elevator is not working', 'log a maintenance issue for the AC unit', 'chair 2 is damaged and wobbly', 'mark the projector as faulty').\n"
+        "- list_problems: user asks which assets/equipment have problems, faults, or pending maintenance (e.g. 'what assets have problems', 'show faulty equipment', 'any maintenance issues', 'what needs fixing', 'list reported problems').\n"
         "- navigate: user wants to go to a place, room, tagged sweep, OR a specific physical object/asset (e.g. 'take me to the kitchen', 'go to bedroom', 'bring me to the fire extinguisher', 'navigate to forklift', 'take me to the nearest chair').\n"
         "- visual: user asks about what is visible in the current view, colors, objects, 'what do you see', 'is there a chair', 'describe this view'.\n"
         "- mark_asset: user wants to tag or mark the CURRENT location with a name (e.g. 'mark this as kitchen', 'tag this place as bedroom', 'help me mark this location as office').\n"
         "- activity: user wants to do an activity that requires going to a specific location (e.g. 'I want to cook', 'I want to sleep', 'I need to work').\n"
         "- conversational: greetings, small talk, general questions not about the current view or moving in the space.\n\n"
         "Respond with ONLY valid JSON (no markdown fences):\n"
-        '{"intent":"navigate"|"visual"|"mark_asset"|"activity"|"conversational"|"query_assets"|"react_query"|"where_am_i","destination_label":string or null,"asset_name":string or null,"query_area":string or null,"reply":string or null}\n'
+        '{"intent":"navigate"|"visual"|"mark_asset"|"activity"|"conversational"|"query_assets"|"react_query"|"where_am_i"|"report_issue"|"list_problems","destination_label":string or null,"asset_name":string or null,"query_area":string or null,"reply":string or null}\n'
         "Rules:\n"
+        "- For report_issue: put the faulty asset/equipment name (including any number, e.g. 'chair #1') in asset_name. Set the other fields to null.\n"
+        "- For list_problems: set all other fields to null.\n"
         "- For where_am_i: set all other fields to null. This triggers a database lookup of the user's current location.\n"
         "- For react_query: set all other fields to null. This triggers multi-step agentic reasoning.\n"
         "- For query_assets: extract the room/area name and put it in query_area. If no room is mentioned, use the MEMORY CONTEXT area. Set destination_label and asset_name to null.\n"
@@ -78,7 +82,7 @@ def route_intent(user_message: str, asset_labels: list[str], last_queried_area: 
                     "properties": {
                         "intent": {
                             "type": "string",
-                            "enum": ["navigate", "visual", "mark_asset", "activity", "conversational", "query_assets", "react_query", "where_am_i"],
+                            "enum": ["navigate", "visual", "mark_asset", "activity", "conversational", "query_assets", "react_query", "where_am_i", "report_issue", "list_problems"],
                         },
                         "destination_label": {
                             "anyOf": [{"type": "string"}, {"type": "null"}],
@@ -193,7 +197,7 @@ def _parse_router_json(text: str) -> dict:
             "reply": "I could not parse the routing response. Please try rephrasing.",
         }
     intent = data.get("intent", "conversational")
-    if intent not in ("navigate", "visual", "conversational", "mark_asset", "activity", "query_assets", "react_query", "where_am_i"):
+    if intent not in ("navigate", "visual", "conversational", "mark_asset", "activity", "query_assets", "react_query", "where_am_i", "report_issue", "list_problems"):
         intent = "conversational"
     return {
         "intent": intent,
@@ -693,6 +697,44 @@ def suggest_location_name_from_objects(detected_objects: dict, building_context:
     except Exception as e:
         current_app.logger.exception(f"[Groq] suggest_location_name_from_objects failed: {e}")
         return None
+
+
+def parse_report_request(user_message: str) -> dict:
+    """Extract the faulty asset, problem description and severity from a spoken
+    maintenance report like 'report chair #1 has a broken leg'."""
+    prompt = (
+        "The user is reporting a maintenance problem with an asset/equipment. Extract:\n"
+        "(1) asset: the asset/equipment name INCLUDING any number, e.g. 'chair #1', 'elevator', 'AC unit 2'.\n"
+        "(2) description: a short description of what is wrong (e.g. 'broken leg', 'not working').\n"
+        "(3) severity: one of low, medium, high, critical. Infer from wording — default medium; "
+        "'broken'/'not working'/'leaking'/'damaged' -> high; 'dangerous'/'unsafe'/'fire'/'sparking'/'hazard' -> critical; "
+        "'minor'/'scratch'/'cosmetic'/'loose' -> low.\n"
+        'Respond ONLY with valid JSON, no markdown: {"asset":"chair #1","description":"broken leg","severity":"high"}\n'
+        f"User request: {user_message}"
+    )
+    model = current_app.config.get("GROQ_MODEL", "llama-3.3-70b-versatile")
+    try:
+        completion = _client().chat.completions.create(
+            model=model,
+            messages=[{"role": "user", "content": prompt}],
+            temperature=0.1,
+            max_tokens=150,
+        )
+        text = (completion.choices[0].message.content or "").strip()
+        m = re.search(r"\{[\s\S]*\}", text)
+        if m:
+            parsed = json.loads(m.group(0))
+            severity = str(parsed.get("severity", "medium")).lower().strip()
+            if severity not in ("low", "medium", "high", "critical"):
+                severity = "medium"
+            return {
+                "asset": str(parsed.get("asset", "")).strip(),
+                "description": str(parsed.get("description", "")).strip(),
+                "severity": severity,
+            }
+    except Exception as e:
+        current_app.logger.exception(f"[Groq] parse_report_request failed: {e}")
+    return {"asset": "", "description": "", "severity": "medium"}
 
 
 def parse_react_request(user_message: str) -> dict:
