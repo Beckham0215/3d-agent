@@ -40,42 +40,6 @@
     </div>
   </div>
 
-  <!-- Live Glass HUD — always-on facility stats, floats top-right -->
-  <div id="live-hud" class="live-hud" style="display:none;" aria-live="polite">
-    <div class="live-hud-row live-hud-loc">
-      <span class="live-hud-icon">📍</span>
-      <div class="live-hud-loc-text">
-        <span class="live-hud-label">Current location</span>
-        <span id="live-hud-room" class="live-hud-room">Detecting…</span>
-      </div>
-    </div>
-    <div class="live-hud-stats">
-      <div class="live-hud-stat">
-        <span id="live-hud-assets" class="live-hud-stat-num">—</span>
-        <span class="live-hud-stat-lbl">Assets</span>
-      </div>
-      <div class="live-hud-stat">
-        <span id="live-hud-rooms" class="live-hud-stat-num">—</span>
-        <span class="live-hud-stat-lbl">Rooms</span>
-      </div>
-      <div class="live-hud-stat">
-        <span id="live-hud-health" class="live-hud-stat-num live-hud-health">—</span>
-        <span class="live-hud-stat-lbl">Health</span>
-      </div>
-    </div>
-  </div>
-
-  <!-- X-Ray Asset Vision — full-viewport neon overlay of every detected asset -->
-  <div id="xray-overlay" class="xray-overlay" style="display:none;">
-    <svg id="xray-svg" viewBox="0 0 1000 1000" preserveAspectRatio="none"></svg>
-    <div id="xray-chips" class="xray-chips"></div>
-    <div class="xray-hud">
-      <span class="xray-hud-dot"></span>
-      <span id="xray-hud-text">Scanning…</span>
-      <button type="button" id="xray-exit" class="xray-exit">✕ Exit X-Ray</button>
-    </div>
-  </div>
-
   <!-- Cinematic Auto-Tour — letterbox bars, glass room card, transport controls -->
   <div id="tour-overlay" class="tour-overlay" style="display:none;">
     <div class="tour-bar tour-bar-top"></div>
@@ -153,16 +117,6 @@
       <div class="toolbar-divider"></div>
 
       <span class="toolbar-section-label">Showcase</span>
-
-      <button type="button" id="xray-btn" class="tool-btn tool-btn--showcase"
-              title="Light up every detected asset in the current view">
-        <span class="tool-btn-icon">🛰️</span><span id="xray-label">X-Ray Vision</span>
-      </button>
-
-      <button type="button" id="health-map-btn" class="tool-btn tool-btn--showcase"
-              title="Show a colour-coded health tag over every room by maintenance status">
-        <span class="tool-btn-icon">🩺</span><span id="health-map-label">Health Map</span>
-      </button>
 
       <button type="button" id="auto-tour-btn" class="tool-btn tool-btn--showcase"
               title="Hands-free cinematic fly-through of every tagged room">

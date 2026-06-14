@@ -651,37 +651,82 @@
     }
   }
 
-  // Live, on-demand localisation for a scanned item that has no cached box.
-  // Returns true if it outlined the item. Caches the box so the next click is
-  // instant.
-  async function _liveLocateScanAsset(assetName, label) {
-    // The captured frame where Scout saw the most of this item is our best shot.
+  // Pick the captured frame where Scout saw the most of this item — that frame's
+  // stored screenshot is the best one to localise it from (no camera movement).
+  function _bestFrameForAsset(assetName) {
     let best = null, bestN = 0;
     pendingScanViewData.forEach((v) => {
       const c = (v.objects && v.objects[assetName]) || 0;
       if (c > bestN) { bestN = c; best = v; }
     });
+    return best;
+  }
+
+  // Background pre-fetch: right after a scan, locate a box for every item that
+  // has no box yet, using the STORED frame images (no camera movement, no extra
+  // screenshots). By the time the user clicks an item the box is already cached,
+  // so highlighting is just "fly + draw" with zero model calls on the click path.
+  // Runs sequentially in the background and cancels itself if a newer scan starts.
+  let _boxPrefetchToken = 0;
+  async function _prefetchMissingBoxes(counts) {
+    const myToken = ++_boxPrefetchToken;
+    for (const name of Object.keys(counts || {})) {
+      if (myToken !== _boxPrefetchToken) return;          // a newer scan superseded us
+      const cached = instanceBboxCache[name] && instanceBboxCache[name].instances && instanceBboxCache[name].instances.length;
+      if (cached) continue;                               // already have a box
+      const best = _bestFrameForAsset(name);
+      if (!best || !best.image) continue;
+      try {
+        const res = await fetch("/api/locate-object", {
+          method: "POST",
+          headers: { "Content-Type": "application/json" },
+          credentials: "same-origin",
+          body: JSON.stringify({ object_name: name, image_base64: best.image }),
+        });
+        const data = await res.json().catch(() => ({ ok: false }));
+        if (myToken !== _boxPrefetchToken) return;
+        if (data.ok && Array.isArray(data.bbox) && data.bbox.length === 4) {
+          const ang = (best.absolute_angle != null ? best.absolute_angle : (best.angle || 0));
+          instanceBboxCache[name] = instanceBboxCache[name] || { instances: [] };
+          instanceBboxCache[name].instances = [{ sweep_uuid: best.sweep_uuid || null, angle: ang, pitch: best.pitch || 0, bbox: data.bbox }];
+          tightBboxCache[name] = data.bbox;
+        }
+      } catch (_) { /* leave it for the click-time fallback */ }
+    }
+  }
+
+  // Click-time fallback when the pre-fetch hasn't cached this item yet. Locates
+  // on the STORED frame image and runs that model call IN PARALLEL with the
+  // camera fly, so the latency is hidden behind the (unavoidable) navigation
+  // instead of stacking on top of it.
+  async function _liveLocateScanAsset(assetName, label) {
+    const best = _bestFrameForAsset(assetName);
     if (!best) return false;
+    const ang = (best.absolute_angle != null ? best.absolute_angle : (best.angle || 0));
+
+    const locateP = (async () => {
+      try {
+        const img = best.image || (await captureViewportBase64());
+        const res = await fetch("/api/locate-object", {
+          method: "POST",
+          headers: { "Content-Type": "application/json" },
+          credentials: "same-origin",
+          body: JSON.stringify({ object_name: assetName, image_base64: img }),
+        });
+        return await res.json().catch(() => ({ ok: false }));
+      } catch (_) { return { ok: false }; }
+    })();
+
     try {
       if (best.sweep_uuid && best.sweep_uuid !== currentSweepUuid) {
         await handleNavigate(best.sweep_uuid);
-        await sleep(1200);
+        await sleep(1000);
       }
-      const ang = (best.absolute_angle != null ? best.absolute_angle : (best.angle || 0));
       try { await rotateToYawAtCurrentSweep(ang, best.pitch || 0); } catch (_) {}
-      await sleep(300);
-      const img = await captureViewportBase64();
-      const res = await fetch("/api/locate-object", {
-        method: "POST",
-        headers: { "Content-Type": "application/json" },
-        credentials: "same-origin",
-        body: JSON.stringify({ object_name: assetName, image_base64: img }),
-      });
-      const data = await res.json().catch(() => ({ ok: false }));
+      const data = await locateP;
       if (data.ok && Array.isArray(data.bbox) && data.bbox.length === 4) {
-        const instObj = { sweep_uuid: best.sweep_uuid || null, angle: ang, pitch: best.pitch || 0, bbox: data.bbox };
         instanceBboxCache[assetName] = instanceBboxCache[assetName] || { instances: [] };
-        instanceBboxCache[assetName].instances = [instObj];
+        instanceBboxCache[assetName].instances = [{ sweep_uuid: best.sweep_uuid || null, angle: ang, pitch: best.pitch || 0, bbox: data.bbox }];
         tightBboxCache[assetName] = data.bbox;
         showHighlightOverlay(label, data.bbox, { segName: assetName });
         return true;
@@ -1692,6 +1737,7 @@
     const counts = _buildCounts(sightings, stepAngles.length);
     pendingScanSweepUuid = currentSweepUuid;
     _prefetchPromise = _prefetchTightBboxes(counts);  // boxes for highlighting only
+    _prefetchMissingBoxes(counts);                    // background: cache boxes for box-less items so clicks are instant
     pendingScanCounts = counts;
     renderScanReview(counts);
     appendLine("agent", `✅ Scan complete. ${formatCountsForChat(counts)}`);
@@ -1774,6 +1820,7 @@
     const counts = _buildCounts(aggregatedSightings, sweeps.length * stepAngles.length);
     if (scanAreaNameInput) scanAreaNameInput.value = category;
     _prefetchPromise = _prefetchTightBboxes(counts);  // boxes for highlighting only
+    _prefetchMissingBoxes(counts);                    // background: cache boxes for box-less items so clicks are instant
     pendingScanCounts = counts;
     renderScanReview(counts);
     if (!scanShouldStop) {
@@ -4209,13 +4256,6 @@
      ══════════════════════════════════════════════════════════════════════ */
 
   const SEV_RANK  = { critical: 4, high: 3, medium: 2, low: 1 };
-  const SEV_COLOR = {
-    critical: { r: 0.86, g: 0.15, b: 0.15 },
-    high:     { r: 0.96, g: 0.45, b: 0.13 },
-    medium:   { r: 0.98, g: 0.75, b: 0.14 },
-    low:      { r: 0.20, g: 0.60, b: 0.86 },
-  };
-  const SEV_COLOR_OK = { r: 0.063, g: 0.639, b: 0.498 };
 
   async function _fetchJson(url, fallback) {
     try {
@@ -4238,178 +4278,6 @@
     let worst = null, wr = 0;
     (problems || []).forEach((p) => { const r = SEV_RANK[p.severity] || 2; if (r > wr) { wr = r; worst = p.severity; } });
     return worst;
-  }
-
-  // ── Live Glass HUD ───────────────────────────────────────────────────────
-  const hudEl     = document.getElementById("live-hud");
-  const hudRoomEl = document.getElementById("live-hud-room");
-  const hudAssetsEl = document.getElementById("live-hud-assets");
-  const hudRoomsEl  = document.getElementById("live-hud-rooms");
-  const hudHealthEl = document.getElementById("live-hud-health");
-
-  function _animateNum(el, to) {
-    if (!el) return;
-    const from = parseInt(el.textContent, 10) || 0;
-    if (from === to) { el.textContent = String(to); return; }
-    const dur = 600, t0 = performance.now();
-    function tick(t) {
-      const k = Math.min(1, (t - t0) / dur);
-      el.textContent = String(Math.round(from + (to - from) * k));
-      if (k < 1) requestAnimationFrame(tick);
-    }
-    requestAnimationFrame(tick);
-  }
-  function updateHudRoom() {
-    if (!hudRoomEl) return;
-    const info = taggedSweepMap[currentSweepUuid];
-    hudRoomEl.textContent = info ? info.label_name : (currentSweepUuid ? "Unmapped area" : "Detecting…");
-  }
-  async function refreshHudStats() {
-    if (!hudEl) return;
-    const [panel, problems] = await Promise.all([_loadAssetsPanel(), _loadProblems()]);
-    const totalAssets = (panel.scan_summaries || []).reduce((s, r) => s + (r.count || 0), 0);
-    const rooms = (panel.assets || []).filter((a) => a.sweep_uuid).length;
-    const probCount = problems.list.length;
-    const worstRank = problems.list.reduce((m, p) => Math.max(m, SEV_RANK[p.severity] || 2), 0);
-    _animateNum(hudAssetsEl, totalAssets);
-    _animateNum(hudRoomsEl, rooms);
-    if (hudHealthEl) {
-      hudHealthEl.textContent = probCount === 0 ? "OK" : String(probCount);
-      hudHealthEl.className = "live-hud-stat-num live-hud-health " +
-        (probCount === 0 ? "is-ok" : worstRank >= 3 ? "is-bad" : "is-warn");
-    }
-  }
-
-  // ── X-Ray Asset Vision ───────────────────────────────────────────────────
-  const xrayOverlay = document.getElementById("xray-overlay");
-  const xraySvg     = document.getElementById("xray-svg");
-  const xrayChips   = document.getElementById("xray-chips");
-  const xrayHudText = document.getElementById("xray-hud-text");
-  const SVG_NS = "http://www.w3.org/2000/svg";
-  let xrayActive = false;
-
-  function _setXrayBtn(on) {
-    const b = document.getElementById("xray-btn");
-    const l = document.getElementById("xray-label");
-    if (b) b.classList.toggle("is-active", on);
-    if (l) l.textContent = on ? "Exit X-Ray" : "X-Ray Vision";
-  }
-  function _clearXrayDraw() {
-    if (xraySvg) while (xraySvg.firstChild) xraySvg.removeChild(xraySvg.firstChild);
-    if (xrayChips) xrayChips.innerHTML = "";
-  }
-  function closeXray() {
-    xrayActive = false;
-    if (xrayOverlay) xrayOverlay.style.display = "none";
-    _clearXrayDraw();
-    _setXrayBtn(false);
-  }
-  function _drawXray(positionsAll, counts) {
-    _clearXrayDraw();
-    let drawn = 0;
-    Object.keys(positionsAll || {}).forEach((name) => {
-      (positionsAll[name] || []).forEach((b, i) => {
-        if (drawn >= 40 || !b || b.length !== 4) return;
-        const [x1, y1, x2, y2] = b;
-        const rect = document.createElementNS(SVG_NS, "rect");
-        rect.setAttribute("x", (x1 * 1000).toFixed(1));
-        rect.setAttribute("y", (y1 * 1000).toFixed(1));
-        rect.setAttribute("width",  ((x2 - x1) * 1000).toFixed(1));
-        rect.setAttribute("height", ((y2 - y1) * 1000).toFixed(1));
-        rect.setAttribute("rx", "8");
-        rect.style.animationDelay = (drawn * 40) + "ms";
-        xraySvg.appendChild(rect);
-        const chip = document.createElement("div");
-        chip.className = "xray-chip";
-        chip.style.left = (((x1 + x2) / 2) * 100).toFixed(2) + "%";
-        chip.style.top  = (y1 * 100).toFixed(2) + "%";
-        chip.style.animationDelay = (drawn * 40 + 120) + "ms";
-        chip.innerHTML = name + ((counts[name] || 0) > 1 ? `<span class="xray-chip-n">#${i + 1}</span>` : "");
-        xrayChips.appendChild(chip);
-        drawn++;
-      });
-    });
-    const totalItems = Object.values(counts || {}).reduce((s, c) => s + c, 0);
-    const totalTypes = Object.keys(counts || {}).length;
-    if (xrayHudText) {
-      xrayHudText.textContent = totalItems
-        ? `${totalItems} asset${totalItems > 1 ? "s" : ""} · ${totalTypes} type${totalTypes > 1 ? "s" : ""} lit up`
-        : "No assets detected in this view";
-    }
-  }
-  async function toggleXray() {
-    if (xrayActive) { closeXray(); return; }
-    if (!sdk || !currentSweepUuid) { appendLine("system", "SDK not ready for X-Ray yet."); return; }
-    xrayActive = true;
-    _setXrayBtn(true);
-    if (xrayOverlay) xrayOverlay.style.display = "block";
-    _clearXrayDraw();
-    if (xrayHudText) xrayHudText.textContent = "Scanning current view…";
-    try {
-      const img = await captureViewportBase64();
-      if (!xrayActive) return;
-      const result = await postScanAsset({
-        map_id: mapId, sweep_uuid: currentSweepUuid, image_base64: img, mode: "normal",
-      });
-      if (!xrayActive) return;
-      _drawXray(result.positions_all || {}, result.objects || {});
-    } catch (e) {
-      if (xrayHudText) xrayHudText.textContent = "X-Ray failed: " + (e.message || String(e));
-    }
-  }
-
-  // ── Digital-Twin Health Map ──────────────────────────────────────────────
-  const healthTags = {}; // sweep_uuid → [tagSid]
-  let healthMapActive = false;
-
-  function _setHealthBtn(on) {
-    const b = document.getElementById("health-map-btn");
-    const l = document.getElementById("health-map-label");
-    if (b) b.classList.toggle("is-active", on);
-    if (l) l.textContent = on ? "Hide Health Map" : "Health Map";
-  }
-  async function _clearHealthMap() {
-    const all = Object.values(healthTags).reduce((acc, v) => acc.concat(v || []), []).filter(Boolean);
-    if (all.length && sdk && sdk.Mattertag) { try { await sdk.Mattertag.remove(all); } catch (_) {} }
-    Object.keys(healthTags).forEach((k) => delete healthTags[k]);
-  }
-  async function toggleHealthMap() {
-    if (healthMapActive) {
-      healthMapActive = false; _setHealthBtn(false);
-      await _clearHealthMap();
-      appendLine("system", "🩺 Health Map hidden.");
-      return;
-    }
-    if (!sdk || !sdk.Mattertag) { appendLine("system", "SDK not ready for the Health Map yet."); return; }
-    healthMapActive = true; _setHealthBtn(true);
-    const [panel, problems] = await Promise.all([_loadAssetsPanel(), _loadProblems()]);
-    const rooms = (panel.assets || []).filter((a) => a.sweep_uuid && allSweepData[a.sweep_uuid] && allSweepData[a.sweep_uuid].position);
-    let placed = 0;
-    for (const a of rooms) {
-      if (!healthMapActive) break; // user toggled off mid-build
-      const sd = allSweepData[a.sweep_uuid];
-      const probs = problems.bySweep[a.sweep_uuid] || [];
-      const worst = _worstSeverity(probs);
-      const color = worst ? SEV_COLOR[worst] : SEV_COLOR_OK;
-      const desc = probs.length
-        ? `${worst.toUpperCase()} — ${probs.length} open issue${probs.length > 1 ? "s" : ""}\n` +
-          probs.slice(0, 4).map((p) => `• ${p.equipment_name} (${p.severity})`).join("\n")
-        : "✓ All equipment healthy";
-      try {
-        const sids = await sdk.Mattertag.add({
-          label: (worst ? "⚠ " : "✓ ") + (a.label_name || "Room"),
-          description: desc,
-          anchorPosition: { x: sd.position.x, y: sd.position.y - 0.1, z: sd.position.z },
-          stemVector: { x: 0, y: 0.45, z: 0 },
-          color: color,
-        });
-        healthTags[a.sweep_uuid] = Array.isArray(sids) ? sids : [sids];
-        placed++;
-      } catch (e) { console.warn("[3DAgent] Health tag failed:", e); }
-    }
-    appendLine("system", placed
-      ? `🩺 Health Map: ${placed} room(s) colour-coded by maintenance status.`
-      : "No tagged rooms to map yet — tag locations or run Auto-Tag first.");
   }
 
   // ── Cinematic Auto-Tour ──────────────────────────────────────────────────
@@ -4559,16 +4427,8 @@
     endAutoTour();
   }
 
-  // ── Showcase wiring + HUD bootstrap ──────────────────────────────────────
+  // ── Showcase wiring (Auto-Tour) ──────────────────────────────────────────
   (function initShowcase() {
-    const xrayBtn = document.getElementById("xray-btn");
-    if (xrayBtn) xrayBtn.addEventListener("click", toggleXray);
-    const xrayExit = document.getElementById("xray-exit");
-    if (xrayExit) xrayExit.addEventListener("click", closeXray);
-
-    const healthBtn = document.getElementById("health-map-btn");
-    if (healthBtn) healthBtn.addEventListener("click", toggleHealthMap);
-
     const tourBtn = document.getElementById("auto-tour-btn");
     if (tourBtn) tourBtn.addEventListener("click", function () {
       if (tourActive) { tourAbort = true; tourSkip = true; tourPaused = false; endAutoTour(); }
@@ -4592,13 +4452,5 @@
     if (tourExitBtn) tourExitBtn.addEventListener("click", function () {
       tourAbort = true; tourSkip = true; tourPaused = false; endAutoTour();
     });
-
-    if (hudEl) {
-      hudEl.style.display = "block";
-      updateHudRoom();
-      refreshHudStats();
-      setInterval(updateHudRoom, 1200);
-      setInterval(refreshHudStats, 30000);
-    }
   })();
 })();
