@@ -15,6 +15,9 @@ instance/
 # Tooling
 .claude/
 
+# Docs (kept locally, not versioned)
+docs/
+
 # Model weights (download separately, not versioned)
 *.pt
 
